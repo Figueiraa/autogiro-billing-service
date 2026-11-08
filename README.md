@@ -1,5 +1,9 @@
 # AutoGiro · Billing Service
 
+[![CI/CD](https://github.com/Figueiraa/autogiro-billing-service/actions/workflows/ci-cd.yml/badge.svg)](https://github.com/Figueiraa/autogiro-billing-service/actions/workflows/ci-cd.yml)
+[![Quality Gate](https://sonarcloud.io/api/project_badges/measure?project=Figueiraa_autogiro-billing-service&metric=alert_status)](https://sonarcloud.io/summary/overall?id=Figueiraa_autogiro-billing-service)
+[![Cobertura](https://sonarcloud.io/api/project_badges/measure?project=Figueiraa_autogiro-billing-service&metric=coverage)](https://sonarcloud.io/component_measures?id=Figueiraa_autogiro-billing-service&metric=coverage)
+
 > Microsserviço de **Cobrança** da plataforma AutoGiro, para redes de oficinas mecânicas.
 > Tech Challenge **Fase 4** (13SOAT): arquitetura de microsserviços com Saga Pattern.
 
@@ -41,6 +45,11 @@ O `JWT_SECRET` é obrigatório e não tem valor padrão no código: o serviço n
 | **Build & Push image** | Imagem Docker + scan de vulnerabilidades (trivy). Na `main`, publica no GHCR para amd64 e arm64 | Sim |
 
 A `main` é protegida: só recebe código por pull request, com as três checagens verdes.
+
+## Qualidade e cobertura
+
+- **Painel do SonarCloud:** <https://sonarcloud.io/summary/overall?id=Figueiraa_autogiro-billing-service> (quality gate, cobertura, bugs, vulnerabilidades e code smells).
+- **Relatório de cada execução:** aba *Summary* da pipeline no GitHub Actions, com o quadro de testes e cobertura, e o artefato `test-and-coverage-reports` (JUnit, `coverage.xml` e HTML).
 
 ## Repositórios da plataforma
 
