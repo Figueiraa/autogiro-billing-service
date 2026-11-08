@@ -70,7 +70,7 @@ class TestMigrations:
         await conn.close()
 
     async def test_aplica_uma_vez_e_cria_as_tabelas(self, banco_limpo):
-        assert await migrate(POSTGRES_URL) == ["001_schema_inicial.sql"]
+        assert await migrate(POSTGRES_URL) == ["001_schema_inicial.sql", "002_contexto_de_rastreamento.sql"]
         assert await migrate(POSTGRES_URL) == []
 
         tabelas = {
