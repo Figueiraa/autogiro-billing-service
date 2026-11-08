@@ -148,6 +148,29 @@ TEST_RABBITMQ_URL=amqp://guest:guest@localhost:5673/ pytest
 
 O `JWT_SECRET` é obrigatório e não tem valor padrão no código: o serviço não sobe sem ele.
 
+## Kubernetes
+
+Manifestos em [`k8s/`](k8s/), aplicados com `kubectl apply -k k8s/` no namespace `autogiro` do
+cluster EKS criado pelo [autogiro-infra-k8s](https://github.com/Figueiraa/autogiro-infra-k8s).
+
+| Recurso | Configuração |
+|---|---|
+| Deployment | 2 réplicas, usuário sem privilégios, sistema de arquivos somente leitura, sondas em `/health/live` e `/health/ready`. Migrations aplicadas por um *init container* antes da API subir. |
+| Service | ClusterIP na porta 80 |
+| HPA | 2 a 6 réplicas, por CPU (70%) e memória (80%) |
+| Ingress (Kong) | `/api/v1/budgets` e `/api/v1/payments`, com JWT. |
+| ConfigMap | Configuração própria do serviço |
+
+A configuração da plataforma vem do Secret e do ConfigMap `autogiro-plataforma`, criados pelo
+`autogiro-infra-k8s`: `JWT_SECRET`, `RABBITMQ_URL` (broker no cluster), `NEW_RELIC_LICENSE_KEY` e o
+endpoint OTLP. O Secret próprio do serviço, `billing-service-secret`, tem a forma de
+[`k8s/secret.example.yaml`](k8s/secret.example.yaml):
+
+| Chave | Conteúdo |
+|---|---|
+| `DATABASE_URL` | Neon do Billing (saída `database_url` do `terraform/`) |
+| `MERCADOPAGO_ACCESS_TOKEN` | Credencial de teste do Mercado Pago |
+
 ## Pipeline (`.github/workflows/ci-cd.yml`)
 
 | Job | O que faz | Bloqueia o merge? |
