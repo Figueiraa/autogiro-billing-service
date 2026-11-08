@@ -7,20 +7,27 @@ name: CI/CD
 #   Lint & Test        -> ruff, bandit, pytest com cobertura mínima de 80%
 #   SonarCloud         -> análise de qualidade com quality gate bloqueante
 #   Build & Push image -> imagem Docker + scan de vulnerabilidades (trivy)
+#
+# Deploy (EKS) roda depois, só na main e com o cluster no ar (DEPLOY_ENABLED);
+# não é checagem obrigatória porque não existe em pull request.
 
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
+  # Disparo manual da main: o script que sobe o cluster publica os serviços.
+  workflow_dispatch:
 
 permissions:
   contents: read
   packages: write
 
+# Em PR, um push novo cancela a execução anterior. Na main, não: cortar a
+# pipeline no meio de um deploy deixaria o rollout pela metade.
 concurrency:
   group: ci-cd-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # ─── CI: lint + segurança + testes com cobertura ───────────────────────────
@@ -136,7 +143,7 @@ jobs:
 
       # Os nós do EKS são Graviton (t4g): a imagem publicada precisa de arm64.
       - uses: docker/setup-qemu-action@v3
-        if: github.event_name == 'push'
+        if: github.event_name != 'pull_request'
         with:
           platforms: arm64
 
@@ -155,7 +162,7 @@ jobs:
           cache-from: type=gha
 
       - name: Log in to GitHub Container Registry
-        if: github.event_name == 'push'
+        if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -164,7 +171,7 @@ jobs:
 
       # Na main: amd64 + arm64, publicada com a tag do commit e `latest`.
       - name: Build and push (main)
-        if: github.event_name == 'push'
+        if: github.event_name != 'pull_request'
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -184,3 +191,114 @@ jobs:
           severity: CRITICAL,HIGH
           exit-code: "1"
           ignore-unfixed: true
+
+  # ─── CD: deploy no EKS ─────────────────────────────────────────────────────
+  # Só na main e só com o cluster no ar: a variável DEPLOY_ENABLED do repositório
+  # é ligada e desligada pelos scripts que sobem e destroem o cluster. Com ela
+  # desligada o job aparece como "skipped" e a pipeline continua verde.
+  deploy:
+    name: Deploy (EKS)
+    needs: [sonar, build]
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && vars.DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    # Um deploy por vez; um push novo espera o anterior terminar em vez de cortá-lo.
+    concurrency:
+      group: deploy-producao
+      cancel-in-progress: false
+    env:
+      AWS_REGION: us-east-1
+      CLUSTER: autogiro
+      NAMESPACE: autogiro
+      SERVICE: billing-service
+      IMAGE: ghcr.io/figueiraa/autogiro-billing-service
+      KONG_PORT: "30080"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Acesso ao cluster
+        run: aws eks update-kubeconfig --region "$AWS_REGION" --name "$CLUSTER"
+
+      # Os valores vêm dos secrets do GitHub e nunca tocam o repositório. O
+      # `apply` atualiza o Secret existente em vez de falhar por ele já existir.
+      - name: Secret do serviço
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          MERCADOPAGO_ACCESS_TOKEN: ${{ secrets.MERCADOPAGO_ACCESS_TOKEN }}
+        run: |
+          kubectl -n "$NAMESPACE" create secret generic "$SERVICE-secret" \
+            --from-literal=DATABASE_URL="$DATABASE_URL" \
+            --from-literal=MERCADOPAGO_ACCESS_TOKEN="$MERCADOPAGO_ACCESS_TOKEN" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      # Cada deploy aponta para a imagem imutável do commit, nunca para `latest`.
+      - name: Imagem do commit
+        run: |
+          sed -i "s/newTag: latest/newTag: ${GITHUB_SHA}/" k8s/kustomization.yaml
+          grep -q "newTag: ${GITHUB_SHA}" k8s/kustomization.yaml
+
+      - name: Apply
+        run: kubectl apply -k k8s/
+
+      # Rollout que não termina (pod que não fica pronto, init container que
+      # falha) desfaz a troca e reprova a pipeline: a versão anterior continua
+      # atendendo.
+      - name: Rollout
+        run: |
+          if ! kubectl -n "$NAMESPACE" rollout status "deploy/$SERVICE" --timeout=300s; then
+            echo "::error::Rollout de $SERVICE não terminou; voltando para a versão anterior."
+            kubectl -n "$NAMESPACE" get pods -l "app=$SERVICE" -o wide || true
+            kubectl -n "$NAMESPACE" logs -l "app=$SERVICE" --all-containers --tail=50 || true
+            kubectl -n "$NAMESPACE" rollout undo "deploy/$SERVICE"
+            exit 1
+          fi
+
+      - name: Smoke test
+        run: |
+          set -euo pipefail
+
+          # 1. O Deployment roda a imagem deste commit, com todas as réplicas
+          #    atualizadas e disponíveis (os pods antigos podem ainda estar saindo).
+          imagem=$(kubectl -n "$NAMESPACE" get "deploy/$SERVICE" -o jsonpath='{.spec.template.spec.containers[0].image}')
+          replicas=$(kubectl -n "$NAMESPACE" get "deploy/$SERVICE" \
+            -o jsonpath='{.status.replicas} {.status.updatedReplicas} {.status.availableReplicas}')
+          echo "Imagem: $imagem | réplicas (total, atualizadas, disponíveis): $replicas"
+          [ "$imagem" = "$IMAGE:$GITHUB_SHA" ] || { echo "::error::Deployment com imagem $imagem"; exit 1; }
+          read -r total atualizadas disponiveis <<< "$replicas"
+          [ "$atualizadas" = "$total" ] && [ "$disponiveis" -ge "$total" ]
+
+          # 2. Prontidão vista de dentro do pod novo: banco e broker respondendo.
+          kubectl -n "$NAMESPACE" exec "deploy/$SERVICE" -- python -c \
+            "import urllib.request; print(urllib.request.urlopen('http://localhost:8000/health/ready', timeout=5).read().decode())"
+
+          # 3. Rota publicada no Kong: sem token, o gateway responde 401 (rota
+          #    existe e o plugin JWT está ativo). 404 seria rota ausente.
+          ip=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="ExternalIP")].address}')
+          codigo=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "http://$ip:$KONG_PORT/api/v1/budgets/1")
+          echo "Kong em http://$ip:$KONG_PORT/api/v1/budgets/1 sem token: HTTP $codigo"
+          [ "$codigo" = "401" ]
+
+      - name: Evidência do deploy
+        if: always()
+        run: |
+          {
+            echo "### Deploy de $SERVICE no EKS"
+            echo ""
+            echo "| Item | Valor |"
+            echo "|---|---|"
+            echo "| Commit | \`${GITHUB_SHA}\` |"
+            echo "| Imagem | \`$IMAGE:$GITHUB_SHA\` |"
+            echo "| Revisão do Deployment | $(kubectl -n "$NAMESPACE" get "deploy/$SERVICE" -o jsonpath='{.metadata.annotations.deployment\.kubernetes\.io/revision}' 2>/dev/null) |"
+            echo ""
+            echo '```'
+            kubectl -n "$NAMESPACE" get pods -l "app=$SERVICE" -o wide 2>/dev/null || true
+            echo ""
+            kubectl -n "$NAMESPACE" rollout history "deploy/$SERVICE" 2>/dev/null || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
