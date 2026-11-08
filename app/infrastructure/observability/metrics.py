@@ -49,6 +49,22 @@ http_exceptions_total = Counter(
     registry=REGISTRY,
 )
 
+# ─── Métricas de negócio ─────────────────────────────────────────────────────
+
+budget_approvals_total = Counter(
+    "autogiro_budget_approvals_total",
+    "Respostas de orçamento recebidas do cliente.",
+    labelnames=("result",),  # approved | refused
+    registry=REGISTRY,
+)
+
+notifications_total = Counter(
+    "autogiro_notifications_total",
+    "Notificações enviadas ao cliente.",
+    labelnames=("channel", "result"),  # channel: email|log — result: sent|skipped|failed
+    registry=REGISTRY,
+)
+
 app_info = Gauge(
     "autogiro_app_info",
     "Metadados do serviço em execução (valor sempre 1).",
@@ -59,6 +75,14 @@ app_info = Gauge(
 
 def set_app_info(name: str, version: str) -> None:
     app_info.labels(version=version, name=name).set(1)
+
+
+def record_budget_approval(approved: bool) -> None:
+    budget_approvals_total.labels(result="approved" if approved else "refused").inc()
+
+
+def record_notification(channel: str, result: str) -> None:
+    notifications_total.labels(channel=channel, result=result).inc()
 
 
 def render_latest() -> bytes:

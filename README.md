@@ -20,6 +20,82 @@ Clean Architecture (domínio, aplicação, infraestrutura e interfaces), sondas 
 métricas Prometheus, logs JSON, validação do JWT emitido pelo `autogiro-auth` e pipeline com
 testes, SonarCloud e imagem Docker.
 
+## API
+
+Todas as rotas exigem o JWT do `autogiro-auth`. Documentação interativa em `/docs` (Swagger).
+
+| Método | Rota | Descrição |
+|---|---|---|
+| `GET` | `/api/v1/budgets/{order_id}` | Orçamento da OS, com serviços e peças |
+| `POST` | `/api/v1/budgets/{order_id}/approve` | Aprova e devolve o **link de pagamento** (Checkout Pro). `502` se o Mercado Pago falhar: o orçamento continua pendente |
+| `POST` | `/api/v1/budgets/{order_id}/reject` | Recusa: a Saga libera as peças e cancela a OS |
+| `GET` | `/api/v1/payments/{order_id}` | Situação do pagamento |
+| `POST` | `/api/v1/payments/{order_id}/sync` | Consulta o Mercado Pago agora, sem esperar o ciclo de 15 s |
+
+## Participação na Saga
+
+O orquestrador fica no OS Service. Este serviço recebe comandos na fila `billing.commands` e
+responde com eventos no exchange `autogiro.events`:
+
+| Origem | Evento |
+|---|---|
+| Comando `GerarOrcamento` | `OrcamentoGerado` (com o total) ou `OrcamentoFalhou` (preço ausente, total zero) |
+| Cliente aprova / recusa | `OrcamentoAprovado` (com o link de pagamento) / `OrcamentoRecusado` |
+| Monitor: prazo de resposta esgotado | `OrcamentoExpirado` |
+| Monitor: consulta ao Mercado Pago | `PagamentoConfirmado`, `PagamentoRecusado` ou `PagamentoExpirado` |
+| Comando `CancelarCobranca` (compensação) | `CobrancaCancelada`, com `estornado` e `estorno_pendente` |
+
+- **Idempotência:** orçamento único por OS; a mesma mensagem entregue duas vezes é descartada.
+- **Outbox:** cada mudança e o evento de resposta são gravados na mesma transação.
+- **Bloqueio:** aprovação e cancelamento simultâneos do mesmo orçamento não se sobrepõem
+  (`SELECT … FOR UPDATE`).
+
+## Pagamento (Mercado Pago)
+
+Checkout Pro com a API de Preferences: o cliente paga numa página do próprio Mercado Pago,
+então o Billing não lida com dados de cartão.
+
+1. **Aprovação:** cria a *preferência* com o valor do orçamento, prazo de expiração e uma
+   `external_reference` única, e devolve o link de pagamento.
+2. **Confirmação por consulta:** a cada 15 s, o monitor busca os pagamentos da referência. Não
+   depende de webhook, porque o endereço público do Kong muda a cada recriação do cluster.
+3. **Pagamento tardio:** um pagamento que chega depois de a cobrança expirar ou ser cancelada
+   ainda é detectado (janela de 24 h) e informado à Saga, que manda estornar.
+4. **Estorno (compensação):** estorno total com chave de idempotência; repetir o comando não
+   estorna duas vezes.
+   - Falha **temporária** (rede, erro 5xx, limite de requisições): nova tentativa e, depois, DLQ.
+   - Recusa **definitiva** (erro 4xx): o pagamento fica `ESTORNO_PENDENTE`, a compensação é
+     confirmada para a Saga não travar e o log registra `ESTORNO MANUAL NECESSÁRIO`. Quando o
+     estorno feito no painel aparece no Mercado Pago, o monitor concilia e o pagamento vira
+     `ESTORNADO`.
+
+A integração fica atrás da porta `PaymentGatewayPort`: os testes usam um dublê e não dependem do
+sandbox. A API de Preferences é marcada como legada pelo Mercado Pago (continua suportada); a
+migração para a API de Orders fica restrita ao adaptador `app/infrastructure/gateways/mercadopago.py`.
+
+### Testar no sandbox
+
+- As credenciais de teste da aplicação pertencem a um **vendedor de teste**: quem paga precisa
+  ser outro usuário de teste. No painel, em *Contas de teste*, crie um **comprador** e entre
+  com ele no link de pagamento (*Com sua conta Mercado Pago*).
+- Cartões de teste: os do painel (*Cartões de teste*), com o status desejado no nome do titular:
+  `APRO` (aprovado), `OTHE` (recusado), `CONT` (pendente). CPF `12345678909`.
+- No sandbox atual, a API recusa o estorno com credenciais de vendedor de teste
+  (`401 Unauthorized use of live credentials`). O fluxo cai no estorno pendente descrito acima.
+
+## Banco de dados
+
+PostgreSQL próprio, num projeto Neon só do serviço (`terraform/`). Postgres porque é dinheiro:
+aprovar o orçamento e criar o pagamento acontecem numa transação ACID. O schema fica em
+`migrations/` e é aplicado por `python -m app.infrastructure.migrations`.
+
+| Tabela | Conteúdo |
+|---|---|
+| `budgets`, `budget_lines` | Orçamento por OS, com serviços e peças (preços copiados do comando) |
+| `payments` | Cobranças no Mercado Pago, com o status e o estorno |
+| `outbox` | Eventos a publicar |
+| `processed_messages` | Comandos já processados |
+
 ## Como rodar
 
 ```bash
@@ -30,8 +106,16 @@ pytest                                  # testes + cobertura (mínimo de 80%)
 ruff check app tests scripts            # lint
 bandit -r app -ll                       # análise de segurança
 
-cp .env.example .env                    # defina o JWT_SECRET
-docker compose up --build               # API em http://localhost:8002 (Swagger em /docs)
+cp .env.example .env                    # defina JWT_SECRET e MERCADOPAGO_ACCESS_TOKEN
+docker compose up --build               # aplica as migrations e sobe a API em http://localhost:8002
+```
+
+Os testes de integração com PostgreSQL e RabbitMQ reais rodam quando `TEST_POSTGRES_URL` e
+`TEST_RABBITMQ_URL` estão definidas (no CI, containers dos dois):
+
+```bash
+TEST_POSTGRES_URL=postgresql+asyncpg://autogiro:autogiro@localhost:5434/autogiro_billing \
+TEST_RABBITMQ_URL=amqp://guest:guest@localhost:5673/ pytest
 ```
 
 O `JWT_SECRET` é obrigatório e não tem valor padrão no código: o serviço não sobe sem ele.

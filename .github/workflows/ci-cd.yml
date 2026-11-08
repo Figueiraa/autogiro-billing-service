@@ -27,6 +27,33 @@ jobs:
   ci:
     name: Lint & Test
     runs-on: ubuntu-latest
+    # PostgreSQL (mesma versão do Neon) e RabbitMQ de verdade para os testes de integração.
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: autogiro_billing
+          POSTGRES_USER: autogiro
+          POSTGRES_PASSWORD: autogiro
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U autogiro -d autogiro_billing"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      rabbitmq:
+        image: rabbitmq:4.0-management
+        ports:
+          - 5672:5672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      TEST_POSTGRES_URL: postgresql+asyncpg://autogiro:autogiro@localhost:5432/autogiro_billing
+      TEST_RABBITMQ_URL: amqp://guest:guest@localhost:5672/
     steps:
       - uses: actions/checkout@v4
 
