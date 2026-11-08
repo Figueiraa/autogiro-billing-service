@@ -1,0 +1,5 @@
+[run]
+branch = True
+# O SQLAlchemy assíncrono executa o acesso ao banco dentro de greenlets: sem isto,
+# o coverage não enxerga as linhas executadas depois de cada await no banco.
+concurrency = greenlet,thread

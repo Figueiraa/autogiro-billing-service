@@ -1,0 +1,7 @@
+# Copie para terraform.tfvars (fora do git) e preencha.
+# A API key do Neon NÃO vai aqui: exporte como variável de ambiente.
+#
+#   PowerShell:  $env:NEON_API_KEY = "sua-api-key"
+#   Bash:        export NEON_API_KEY="sua-api-key"
+
+org_id = "org-xxxx-xxxx-00000000"
