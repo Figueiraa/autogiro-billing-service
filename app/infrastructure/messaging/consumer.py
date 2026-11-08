@@ -15,6 +15,7 @@ from aio_pika.abc import AbstractIncomingMessage
 
 from app.application.messages import Envelope, InvalidMessageError
 from app.infrastructure.messaging.rabbitmq import RabbitMQClient, dead_letter_queue, retry_queue
+from app.infrastructure.observability.tracing import annotate_message, consume_span, record_outcome
 
 logger = logging.getLogger("autogiro.messaging")
 
@@ -49,6 +50,12 @@ async def process(
         return Delivery(Outcome.DEAD_LETTER, error=str(exc))
 
     retry_count = int(headers.get(RETRY_HEADER, 0) or 0)
+    annotate_message(
+        saga_id=envelope.saga_id,
+        order_id=envelope.order_id,
+        message_type=envelope.type,
+        retry_count=retry_count,
+    )
     try:
         await handle(envelope)
     except Exception as exc:  # falha técnica: banco fora, bug, payload inesperado
@@ -77,8 +84,16 @@ class QueueConsumer:
 
     async def __call__(self, message: AbstractIncomingMessage) -> None:
         headers = dict(message.headers or {})
-        delivery = await process(message.body, headers, self._handle, self._max_retries)
+        with consume_span(self._queue, headers, message.message_id, message.type) as span:
+            delivery = await process(message.body, headers, self._handle, self._max_retries)
+            record_outcome(span, delivery.outcome.value, delivery.error)
+            await self._divert(message, headers, delivery)
+        # O ack só sai depois do commit (DONE) ou depois de a mensagem estar a salvo
+        # na fila de retry ou na DLQ: nada se perde se o pod cair no meio.
+        await message.ack()
 
+    async def _divert(self, message: AbstractIncomingMessage, headers: dict, delivery: Delivery) -> None:
+        """Manda a mensagem para a fila de retry ou para a DLQ, conforme o desfecho."""
         if delivery.outcome is not Outcome.DONE:
             target = (
                 retry_queue(self._queue)
@@ -96,6 +111,3 @@ class QueueConsumer:
                 message_type=message.type or "",
                 headers=headers,
             )
-        # O ack só sai depois do commit (DONE) ou depois de a mensagem estar a salvo
-        # na fila de retry ou na DLQ: nada se perde se o pod cair no meio.
-        await message.ack()

@@ -48,6 +48,12 @@ class Settings(BaseSettings):
     SMTP_USE_TLS: bool = True
     SMTP_TIMEOUT: int = 10
 
+    # Rastreamento distribuído (OpenTelemetry → New Relic). Sem endpoint, nada é
+    # exportado. No New Relic: https://otlp.nr-data.net, com a license key da conta.
+    OTEL_EXPORTER_OTLP_ENDPOINT: str | None = None
+    NEW_RELIC_LICENSE_KEY: str | None = None
+    DEPLOYMENT_ENVIRONMENT: str = "local"
+
     LOG_LEVEL: str = "INFO"
     CORS_ORIGINS: str = "*"  # lista separada por vírgula; use origens explícitas em produção
 

@@ -187,7 +187,7 @@ class TestOutboxELaco:
         )
         publicadas = []
 
-        async def publicar(exchange, routing_key, body, *, message_id, message_type):
+        async def publicar(exchange, routing_key, body, *, message_id, message_type, headers=None):
             publicadas.append((routing_key, message_type))
 
         assert await publish_pending(session_factory, publicar) == 1

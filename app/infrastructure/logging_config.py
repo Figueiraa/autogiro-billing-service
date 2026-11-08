@@ -3,13 +3,25 @@ import logging
 import sys
 from contextvars import ContextVar
 
+from opentelemetry import trace
+
 # Correlação de logs por requisição (preenchido pelo RequestIdMiddleware).
 request_id_ctx: ContextVar[str | None] = ContextVar("request_id", default=None)
 
+# Saga, OS e tipo da mensagem em processamento (preenchido pelo consumidor da fila).
+message_ctx: ContextVar[dict | None] = ContextVar("message_ctx", default=None)
+
 
 class RequestIdFilter(logging.Filter):
+    """Anexa ao registro o request id, o trace atual e a mensagem em processamento."""
+
     def filter(self, record: logging.LogRecord) -> bool:
         record.request_id = request_id_ctx.get()
+        span_context = trace.get_current_span().get_span_context()
+        if span_context.is_valid:
+            record.trace_id = format(span_context.trace_id, "032x")
+            record.span_id = format(span_context.span_id, "016x")
+        record.message_fields = message_ctx.get() or {}
         return True
 
 
@@ -36,6 +48,12 @@ class JsonFormatter(logging.Formatter):
         request_id = getattr(record, "request_id", None)
         if request_id:
             payload["request_id"] = request_id
+        # `trace.id` e `span.id` são os nomes que o New Relic usa para ligar log e trace.
+        trace_id = getattr(record, "trace_id", None)
+        if trace_id:
+            payload["trace.id"] = trace_id
+            payload["span.id"] = record.span_id
+        payload.update(getattr(record, "message_fields", None) or {})
         if record.exc_info:
             payload["exc_info"] = self.formatException(record.exc_info)
         return json.dumps(payload, ensure_ascii=False)
