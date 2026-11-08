@@ -1,0 +1,35 @@
+# Rotas do billing-service no Kong. Os três serviços dividem o prefixo /api/v1, cada um
+# com os seus recursos, então o gateway roteia pelo recurso e o caminho chega
+# inteiro ao serviço (strip-path desligado).
+#
+# `autogiro-jwt` valida o token emitido pela Lambda autogiro-auth antes de
+# encaminhar; `autogiro-prometheus` publica as métricas do gateway por rota. Os
+# plugins são anexados por annotation: o label `global` foi depreciado e é
+# ignorado em silêncio pelo ingress controller.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: billing-service
+  namespace: autogiro
+  annotations:
+    konghq.com/plugins: autogiro-jwt,autogiro-prometheus
+    konghq.com/strip-path: "false"
+spec:
+  ingressClassName: kong
+  rules:
+    - http:
+        paths:
+          - path: /api/v1/budgets
+            pathType: Prefix
+            backend:
+              service:
+                name: billing-service
+                port:
+                  name: http
+          - path: /api/v1/payments
+            pathType: Prefix
+            backend:
+              service:
+                name: billing-service
+                port:
+                  name: http

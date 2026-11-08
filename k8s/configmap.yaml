@@ -1,0 +1,17 @@
+# Configuração própria do billing-service. O que é da plataforma (JWT, RabbitMQ, New Relic)
+# vem do ConfigMap e do Secret `autogiro-plataforma`.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: billing-service-config
+  namespace: autogiro
+  labels:
+    app: billing-service
+data:
+  LOG_LEVEL: "INFO"
+  CORS_ORIGINS: "*"
+  NOTIFICATION_CHANNEL: "log"
+  # Intervalo do monitor que consulta o Mercado Pago.
+  PAYMENT_POLL_SECONDS: "15"
+  PAYMENT_TIMEOUT_MINUTES: "60"
+  APPROVAL_TIMEOUT_MINUTES: "1440"

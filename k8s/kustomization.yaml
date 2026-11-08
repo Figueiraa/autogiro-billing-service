@@ -1,0 +1,25 @@
+# billing-service: orçamento, pagamento no Mercado Pago e estorno.
+#
+#   kubectl apply -k k8s/
+#
+# Pré-requisitos no namespace `autogiro`, criados pelo autogiro-infra-k8s:
+#   - Secret e ConfigMap `autogiro-plataforma` (JWT, RabbitMQ, New Relic);
+#   - KongPlugins `autogiro-jwt` e `autogiro-prometheus`.
+# E o Secret `billing-service-secret`, deste serviço (ver secret.example.yaml).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: autogiro
+
+resources:
+  - configmap.yaml
+  - deployment.yaml
+  - service.yaml
+  - hpa.yaml
+  - ingress.yaml
+
+# A pipeline troca a tag pelo hash do commit (`kustomize edit set image`), para que
+# cada deploy aponte para uma imagem imutável.
+images:
+  - name: ghcr.io/figueiraa/autogiro-billing-service
+    newTag: latest
