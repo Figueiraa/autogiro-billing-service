@@ -9,6 +9,7 @@ from sqlalchemy.orm import selectinload
 from app.application.messages import Envelope
 from app.domain.entities.budget import Budget, BudgetLine, BudgetStatus
 from app.domain.entities.payment import Payment, PaymentStatus
+from app.infrastructure.observability.tracing import dump_context
 from app.infrastructure.persistence.models import (
     BudgetLineModel,
     BudgetModel,
@@ -201,6 +202,7 @@ class SqlOutbox:
                 exchange=envelope.exchange,
                 routing_key=envelope.routing_key,
                 body=envelope.to_json(),
+                trace_context=dump_context(),
             )
         )
 

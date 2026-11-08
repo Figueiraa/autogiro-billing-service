@@ -13,3 +13,11 @@ sqlalchemy==2.0.36
 asyncpg==0.30.0
 greenlet==3.1.1
 aio-pika==9.5.5
+# Rastreamento distribuído (OpenTelemetry → New Relic por OTLP). O SDK 1.45 casa
+# com as instrumentações 0.66b2.
+opentelemetry-api==1.45.2
+opentelemetry-sdk==1.45.2
+opentelemetry-exporter-otlp-proto-http==1.45.2
+opentelemetry-instrumentation-fastapi==0.66b2
+opentelemetry-instrumentation-httpx==0.66b2
+opentelemetry-instrumentation-sqlalchemy==0.66b2

@@ -9,10 +9,11 @@ from fastapi.middleware.cors import CORSMiddleware
 import app.infrastructure.persistence.models  # noqa: F401
 from app.infrastructure.composition import build_billing
 from app.infrastructure.config import settings
-from app.infrastructure.database import AsyncSessionLocal, database_is_up
+from app.infrastructure.database import AsyncSessionLocal, database_is_up, engine
 from app.infrastructure.logging_config import setup_logging
 from app.infrastructure.messaging.runtime import MessagingRuntime
 from app.infrastructure.observability.metrics import set_app_info
+from app.infrastructure.observability.tracing import setup_tracing, shutdown_tracing
 from app.infrastructure.persistence.repositories import unit_of_work_factory
 from app.interfaces.http.controllers import billing_controller, health
 from app.interfaces.http.exception_handlers import register_exception_handlers
@@ -38,6 +39,7 @@ async def lifespan(app: FastAPI):
     yield
     if runtime is not None:
         await runtime.stop()
+    shutdown_tracing()
 
 
 def create_app() -> FastAPI:
@@ -53,6 +55,15 @@ def create_app() -> FastAPI:
     app.state.readiness_checks = {}
 
     set_app_info(name=settings.SERVICE_NAME, version=settings.SERVICE_VERSION)
+    setup_tracing(
+        app,
+        service_name=settings.SERVICE_NAME,
+        service_version=settings.SERVICE_VERSION,
+        environment=settings.DEPLOYMENT_ENVIRONMENT,
+        endpoint=settings.OTEL_EXPORTER_OTLP_ENDPOINT,
+        license_key=settings.NEW_RELIC_LICENSE_KEY,
+        sqlalchemy_engine=engine,
+    )
 
     # Middlewares (o último adicionado é o mais externo).
     app.add_middleware(SecurityHeadersMiddleware)

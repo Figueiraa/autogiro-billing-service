@@ -13,6 +13,7 @@ from app.infrastructure.observability.metrics import (
     http_requests_in_progress,
     http_requests_total,
 )
+from app.infrastructure.observability.tracing import annotate
 
 # Endpoint de exposição das métricas — não é instrumentado a si mesmo.
 METRICS_PATH = "/metrics"
@@ -39,6 +40,10 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
         started = time.perf_counter()
         try:
             response = await call_next(request)
+            # Liga o span da requisição à OS, quando a rota é de uma OS específica.
+            order_id = request.scope.get("path_params", {}).get("order_id")
+            if order_id is not None:
+                annotate(order_id=order_id)
 
             # O log fica DENTRO do try, antes do reset do ContextVar: e o
             # RequestIdFilter que injeta o request_id no registro, lendo o

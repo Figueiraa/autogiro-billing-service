@@ -17,6 +17,7 @@ from app.application.use_cases.billing import BillingService
 from app.infrastructure.config import settings
 from app.infrastructure.messaging.consumer import QueueConsumer
 from app.infrastructure.messaging.rabbitmq import RabbitMQClient
+from app.infrastructure.observability.tracing import load_context, publish_span
 from app.infrastructure.persistence.repositories import SqlOutbox
 
 logger = logging.getLogger("autogiro.messaging")
@@ -34,13 +35,22 @@ async def publish_pending(
     published = 0
     async with session_factory() as db:
         for row in await SqlOutbox(db).pending(limit):
-            await publish(
-                row.exchange,
-                row.routing_key,
-                row.body.encode("utf-8"),
+            with publish_span(
+                exchange=row.exchange,
+                routing_key=row.routing_key,
                 message_id=row.message_id,
                 message_type=row.message_type,
-            )
+                body=row.body,
+                stored_context=load_context(row.trace_context),
+            ) as headers:
+                await publish(
+                    row.exchange,
+                    row.routing_key,
+                    row.body.encode("utf-8"),
+                    message_id=row.message_id,
+                    message_type=row.message_type,
+                    headers=headers,
+                )
             row.published_at = datetime.now(UTC)
             await db.commit()
             published += 1

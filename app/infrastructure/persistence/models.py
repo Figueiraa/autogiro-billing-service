@@ -81,6 +81,8 @@ class OutboxMessage(Base):
     exchange: Mapped[str] = mapped_column(String(60), nullable=False)
     routing_key: Mapped[str] = mapped_column(String(120), nullable=False)
     body: Mapped[str] = mapped_column(Text, nullable=False)
+    # Cabeçalhos W3C (`traceparent`) do trace em que o evento foi criado.
+    trace_context: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now)
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
