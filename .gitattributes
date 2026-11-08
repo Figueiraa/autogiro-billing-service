@@ -1,0 +1,29 @@
+# Normaliza os finais de linha no repositorio.
+#
+# Sem isto, um arquivo gravado no Windows (CRLF) e lido pelo runner Linux do CI
+# (LF) faz o Terraform enxergar mudanca onde o conteudo e identico: o `plan` do
+# CI mostrava "5 to change" nos alertas do New Relic com as linhas iguais dos
+# dois lados, porque o heredoc da query NRQL entrava no state com CRLF.
+#
+# `text=auto` deixa o Git decidir o que e texto; as regras abaixo forcam LF no
+# que e lido por ferramenta que roda em Linux.
+* text=auto
+
+*.tf    text eol=lf
+*.tfvars text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.json  text eol=lf
+*.sql   text eol=lf
+*.py    text eol=lf
+*.sh    text eol=lf
+*.md    text eol=lf
+
+# Scripts de PowerShell rodam no Windows: mantem CRLF.
+*.ps1   text eol=crlf
+
+# Binarios: nunca converter.
+*.png   binary
+*.jpg   binary
+*.pdf   binary
+*.ico   binary

@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Ambiente virtual
+.venv/
+venv/
+
+# Variáveis de ambiente (credenciais reais nunca vão para o git)
+.env
+
+# Pytest / cobertura (relatórios gerados a cada execução)
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+report/
+
+# Ruff / Mypy
+.ruff_cache/
+.mypy_cache/
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+.terraform.lock.hcl
+terraform.tfvars
