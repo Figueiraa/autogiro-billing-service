@@ -178,8 +178,27 @@ endpoint OTLP. O Secret próprio do serviço, `billing-service-secret`, tem a fo
 | **Lint & Test** | ruff, bandit e pytest com cobertura mínima de 80% | Sim |
 | **SonarCloud** | Análise de qualidade com quality gate bloqueante | Sim |
 | **Build & Push image** | Imagem Docker + scan de vulnerabilidades (trivy). Na `main`, publica no GHCR para amd64 e arm64 | Sim |
+| **Deploy (EKS)** | Na `main`, com o cluster no ar: atualiza o Secret do serviço, aplica `k8s/` com a imagem do commit, espera o rollout e roda o smoke test | Não (só existe na `main`) |
 
 A `main` é protegida: só recebe código por pull request, com as três checagens verdes.
+
+### Deploy contínuo
+
+Todo merge na `main` publica o serviço no EKS, sem passo manual:
+
+1. A imagem sai com a tag do commit (imutável); o `k8s/kustomization.yaml` passa a apontar para ela.
+2. O Secret `billing-service-secret` é atualizado a partir dos secrets do GitHub (`DATABASE_URL` e `MERCADOPAGO_ACCESS_TOKEN`).
+3. `kubectl apply -k k8s/` e `kubectl rollout status`. Se o rollout não terminar em 5 minutos, a
+   pipeline faz `rollout undo` e falha: a versão anterior continua atendendo.
+4. Smoke test: o Deployment roda a imagem do commit com todas as réplicas disponíveis, a prontidão
+   (banco e broker) responde de dentro do pod e a rota está publicada no Kong (401 sem token).
+5. O resumo da execução registra commit, imagem, revisão do Deployment e os pods em execução.
+
+O job só roda com a variável `DEPLOY_ENABLED` do repositório em `true`. Ela é ligada pelo script que
+sobe o cluster, que também dispara a pipeline da `main` (`workflow_dispatch`) para a primeira
+publicação, e desligada pelo script que o destrói: com o cluster desligado o job aparece como
+*skipped* e a pipeline segue verde. As credenciais da AWS (`AWS_ACCESS_KEY_ID` e
+`AWS_SECRET_ACCESS_KEY`) também ficam nos secrets do repositório.
 
 ## Qualidade e cobertura
 
