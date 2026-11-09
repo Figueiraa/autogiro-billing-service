@@ -1,7 +1,7 @@
 """Métricas de aplicação no formato Prometheus (OpenMetrics).
 
 Concentra os coletores expostos em `GET /metrics`. Os nomes mantêm o prefixo
-`autogiro_` do TC3, para que os painéis do New Relic sirvam aos três serviços;
+`autogiro_` da primeira versão da plataforma, para que os painéis do New Relic sirvam aos três serviços;
 o serviço de origem é identificado por `autogiro_app_info` e pelos rótulos do pod.
 
 As métricas de negócio do serviço também são registradas neste módulo.

@@ -1,22 +1,19 @@
-"""Conexão com o RabbitMQ e topologia usada pelo OS Service.
+"""Conexão com o RabbitMQ e topologia usada pelo Billing Service.
 
 Exchanges (compartilhados pelos três serviços, declarados por todos):
     autogiro.commands  direct  — comandos do orquestrador para os participantes
     autogiro.events    topic   — eventos dos participantes
 
-Filas do OS Service:
-    os.saga-events        eventos de execution.# e billing.#
-    os.saga-events.retry  espera com TTL; ao expirar, a mensagem volta para a fila principal
-    os.saga-events.dlq    mensagens que falharam em todas as tentativas
+Filas do Billing Service (declaradas em messaging/runtime.py):
+    billing.commands        comandos billing.gerar-orcamento e billing.cancelar-cobranca
+    billing.commands.retry  espera com TTL; ao expirar, a mensagem volta para a fila principal
+    billing.commands.dlq    mensagens que falharam em todas as tentativas
 """
 
 import aio_pika
 from aio_pika.abc import AbstractChannel, AbstractQueue, AbstractRobustConnection
 
 from app.application.messages import EXCHANGE_COMMANDS, EXCHANGE_EVENTS
-
-QUEUE_SAGA_EVENTS = "os.saga-events"
-SAGA_EVENT_BINDINGS = ("execution.#", "billing.#")
 
 
 def retry_queue(queue: str) -> str:
