@@ -14,6 +14,24 @@
 | **Banco** | PostgreSQL (Neon) |
 | **Comunicação** | REST pelo Kong (borda) · RabbitMQ (comandos e eventos da Saga) |
 
+```mermaid
+flowchart LR
+    CLI([Cliente]) -->|REST + JWT| KONG[Kong] --> API[Billing Service]
+    OS[OS Service] -->|"billing.commands"| API
+    API -->|"autogiro.events (billing.*)"| OS
+    API --> DB[(PostgreSQL)]
+    API -->|"preferência, consulta, estorno"| MP[Mercado Pago]
+```
+
+## Documentação
+
+- [Arquitetura do serviço](docs/arquitetura.md): componentes, modelo de dados, máquinas de
+  estado do orçamento e do pagamento, mensagens, confirmação por consulta, pagamento tardio,
+  estorno e rastreamento.
+- [ADR-010: Mercado Pago Checkout Pro e confirmação por consulta](docs/adr/ADR-010-mercado-pago-checkout-pro.md).
+- [Documentação geral da plataforma](https://github.com/Figueiraa/autogiro-os-service/blob/main/docs/README.md)
+  (no OS Service): visão geral, Saga e decisões compartilhadas.
+
 ## Estrutura
 
 Clean Architecture (domínio, aplicação, infraestrutura e interfaces), sondas de saúde,
@@ -27,24 +45,28 @@ Todas as rotas exigem o JWT do `autogiro-auth`. Documentação interativa em `/d
 | Método | Rota | Descrição |
 |---|---|---|
 | `GET` | `/api/v1/budgets/{order_id}` | Orçamento da OS, com serviços e peças |
-| `POST` | `/api/v1/budgets/{order_id}/approve` | Aprova e devolve o **link de pagamento** (Checkout Pro). `502` se o Mercado Pago falhar: o orçamento continua pendente |
-| `POST` | `/api/v1/budgets/{order_id}/reject` | Recusa: a Saga libera as peças e cancela a OS |
+| `POST` | `/api/v1/budgets/{order_id}/approve` | Aprova e devolve o **link de pagamento** (Checkout Pro). `502` se o Mercado Pago falhar: o orçamento continua pendente. `422` se o prazo de resposta venceu ou o orçamento já foi respondido |
+| `POST` | `/api/v1/budgets/{order_id}/reject` | Recusa: a Saga libera as peças e cancela a OS. `422` nas mesmas condições da aprovação |
 | `GET` | `/api/v1/payments/{order_id}` | Situação do pagamento |
 | `POST` | `/api/v1/payments/{order_id}/sync` | Consulta o Mercado Pago agora, sem esperar o ciclo de 15 s |
 
 ## Participação na Saga
 
-O orquestrador fica no OS Service. Este serviço recebe comandos na fila `billing.commands` e
-responde com eventos no exchange `autogiro.events`:
+O orquestrador fica no OS Service. Este serviço recebe comandos na fila `billing.commands`
+(routing keys `billing.gerar-orcamento` e `billing.cancelar-cobranca`, com as filas
+`billing.commands.retry` e `billing.commands.dlq`) e responde com eventos no exchange
+`autogiro.events`, com routing key `billing.<evento-em-kebab-case>`:
 
 | Origem | Evento |
 |---|---|
-| Comando `GerarOrcamento` | `OrcamentoGerado` (com o total) ou `OrcamentoFalhou` (preço ausente, total zero) |
+| Comando `GerarOrcamento` | `OrcamentoGerado` (com o total) ou `OrcamentoFalhou` (sem serviços nem peças, preço ausente, total zero) |
 | Cliente aprova / recusa | `OrcamentoAprovado` (com o link de pagamento) / `OrcamentoRecusado` |
 | Monitor: prazo de resposta esgotado | `OrcamentoExpirado` |
-| Monitor: consulta ao Mercado Pago | `PagamentoConfirmado`, `PagamentoRecusado` ou `PagamentoExpirado` |
+| Monitor (ou `POST /payments/{order_id}/sync`): consulta ao Mercado Pago | `PagamentoConfirmado` ou `PagamentoRecusado`; `PagamentoExpirado` quando o prazo de pagamento vence sem pagamento aprovado |
 | Comando `CancelarCobranca` (compensação) | `CobrancaCancelada`, com `estornado` e `estorno_pendente` |
 
+- **Aviso ao cliente:** ao gerar o orçamento, o cliente é avisado por log estruturado ou, com
+  `SMTP_HOST` configurado, por e-mail.
 - **Idempotência:** orçamento único por OS; a mesma mensagem entregue duas vezes é descartada.
 - **Outbox:** cada mudança e o evento de resposta são gravados na mesma transação.
 - **Bloqueio:** aprovação e cancelamento simultâneos do mesmo orçamento não se sobrepõem
@@ -57,7 +79,7 @@ então o Billing não lida com dados de cartão.
 
 1. **Aprovação:** cria a *preferência* com o valor do orçamento, prazo de expiração e uma
    `external_reference` única, e devolve o link de pagamento.
-2. **Confirmação por consulta:** a cada 15 s, o monitor busca os pagamentos da referência. Não
+2. **Confirmação por consulta:** a cada `PAYMENT_POLL_SECONDS` (15 s), o monitor busca os pagamentos da referência. Não
    depende de webhook, porque o endereço público do Kong muda a cada recriação do cluster.
 3. **Pagamento tardio:** um pagamento que chega depois de a cobrança expirar ou ser cancelada
    ainda é detectado (janela de 24 h) e informado à Saga, que manda estornar.
@@ -107,6 +129,9 @@ Como uma OS vira **um trace só** entre os serviços:
   durante o processamento de uma mensagem, `saga_id`, `order_id` e `message_type`.
 - Consultas ao banco feitas pelos laços em segundo plano (outbox, monitor de pagamentos, sondas de saúde) não abrem
   trace próprio: só aparecem dentro de uma requisição ou mensagem.
+- Exceção: os eventos criados pelo monitor de pagamentos (confirmação, recusa ou expiração do
+  pagamento, orçamento expirado) não nascem de uma requisição nem de uma mensagem. O envio deles
+  começa um trace novo, que continua no OS Service a partir dali.
 
 O painel **AutoGiro — Saga e rastreamento** e o alerta de mensagem na DLQ ficam no
 [autogiro-infra-k8s](https://github.com/Figueiraa/autogiro-infra-k8s), em Terraform.
@@ -123,6 +148,7 @@ aprovar o orçamento e criar o pagamento acontecem numa transação ACID. O sche
 | `payments` | Cobranças no Mercado Pago, com o status e o estorno |
 | `outbox` | Eventos a publicar |
 | `processed_messages` | Comandos já processados |
+| `schema_migrations` | Migrations já aplicadas (controle do `app.infrastructure.migrations`) |
 
 ## Como rodar
 
@@ -202,8 +228,28 @@ publicação, e desligada pelo script que o destrói: com o cluster desligado o 
 
 ## Qualidade e cobertura
 
-- **Painel do SonarCloud:** <https://sonarcloud.io/summary/overall?id=Figueiraa_autogiro-billing-service> (quality gate, cobertura, bugs, vulnerabilidades e code smells).
+[![Quality Gate](https://sonarcloud.io/api/project_badges/measure?project=Figueiraa_autogiro-billing-service&metric=alert_status)](https://sonarcloud.io/summary/overall?id=Figueiraa_autogiro-billing-service)
+[![Cobertura](https://sonarcloud.io/api/project_badges/measure?project=Figueiraa_autogiro-billing-service&metric=coverage)](https://sonarcloud.io/component_measures?id=Figueiraa_autogiro-billing-service&metric=coverage)
+[![Bugs](https://sonarcloud.io/api/project_badges/measure?project=Figueiraa_autogiro-billing-service&metric=bugs)](https://sonarcloud.io/project/issues?id=Figueiraa_autogiro-billing-service&types=BUG)
+[![Vulnerabilidades](https://sonarcloud.io/api/project_badges/measure?project=Figueiraa_autogiro-billing-service&metric=vulnerabilities)](https://sonarcloud.io/project/issues?id=Figueiraa_autogiro-billing-service&types=VULNERABILITY)
+[![Code smells](https://sonarcloud.io/api/project_badges/measure?project=Figueiraa_autogiro-billing-service&metric=code_smells)](https://sonarcloud.io/project/issues?id=Figueiraa_autogiro-billing-service&types=CODE_SMELL)
+
+Cobertura de **98,6%** na `main`, com 196 testes, quality gate aprovado e nenhum bug,
+vulnerabilidade ou code smell aberto. A pipeline exige no mínimo 80% (`--cov-fail-under=80`) e o
+quality gate do SonarCloud bloqueia o merge.
+
+![Painel do SonarCloud](docs/img/sonarcloud.png)
+
+- **Painel do SonarCloud:** <https://sonarcloud.io/summary/overall?id=Figueiraa_autogiro-billing-service> (os badges acima são atualizados a cada análise).
 - **Relatório de cada execução:** aba *Summary* da pipeline no GitHub Actions, com o quadro de testes e cobertura, e o artefato `test-and-coverage-reports` (JUnit, `coverage.xml` e HTML).
+
+## Swagger e Postman
+
+- **Swagger:** `http://localhost:8002/docs` com o serviço rodando localmente; no cluster,
+  `kubectl -n autogiro port-forward svc/billing-service 8002:80` e o mesmo endereço.
+- [`docs/openapi.json`](docs/openapi.json): a especificação OpenAPI exportada da aplicação.
+- [`docs/postman/billing-service.postman_collection.json`](docs/postman/billing-service.postman_collection.json): todas as rotas do serviço,
+  com as variáveis `base_url`, `token` e os ids usados nos caminhos.
 
 ## Repositórios da plataforma
 

@@ -1,0 +1,238 @@
+{
+  "info": {
+    "name": "AutoGiro · Billing Service",
+    "description": "Todas as rotas do AutoGiro · Billing Service, geradas a partir do OpenAPI do serviço (docs/openapi.json).\n\n`base_url`: localmente http://localhost:8002; no cluster, o endereço do Kong (http://<ip-do-nó>:30080), exceto as rotas de saúde e métricas, que não passam pelo gateway.\n`token`: JWT emitido pela Lambda autogiro-auth a partir do CPF.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{token}}",
+        "type": "string"
+      }
+    ]
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://localhost:8002"
+    },
+    {
+      "key": "token",
+      "value": ""
+    },
+    {
+      "key": "order_id",
+      "value": "1"
+    }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "item": [
+        {
+          "name": "Health",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/health",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "health"
+              ]
+            },
+            "description": "Health",
+            "auth": {
+              "type": "noauth"
+            }
+          }
+        },
+        {
+          "name": "Liveness",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/health/live",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "health",
+                "live"
+              ]
+            },
+            "description": "Liveness",
+            "auth": {
+              "type": "noauth"
+            }
+          }
+        },
+        {
+          "name": "Readiness",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/health/ready",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "health",
+                "ready"
+              ]
+            },
+            "description": "Pronto para receber tráfego quando todas as dependências respondem.\n\nCada serviço registra suas verificações (banco, broker) em\n`app.state.readiness_checks`: um dicionário nome → função assíncrona que\ndevolve `True` quando a dependência está de pé.",
+            "auth": {
+              "type": "noauth"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Observabilidade",
+      "item": [
+        {
+          "name": "Métricas no formato Prometheus",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/metrics",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "metrics"
+              ]
+            },
+            "description": "Endpoint de scrape do Prometheus (agente do New Relic no cluster).",
+            "auth": {
+              "type": "noauth"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Orçamentos",
+      "item": [
+        {
+          "name": "Get Budget",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/budgets/{{order_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "budgets",
+                "{{order_id}}"
+              ]
+            },
+            "description": "Orçamento da OS, com os serviços e as peças."
+          }
+        },
+        {
+          "name": "Approve",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/budgets/{{order_id}}/approve",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "budgets",
+                "{{order_id}}",
+                "approve"
+              ]
+            },
+            "description": "Aprova o orçamento e devolve o link de pagamento (Checkout Pro do Mercado Pago).\n\nSe o Mercado Pago não responder, devolve 502 e o orçamento continua pendente."
+          }
+        },
+        {
+          "name": "Reject",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/budgets/{{order_id}}/reject",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "budgets",
+                "{{order_id}}",
+                "reject"
+              ]
+            },
+            "description": "Recusa o orçamento: a Saga libera as peças e cancela a OS."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Pagamentos",
+      "item": [
+        {
+          "name": "Get Payment",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/payments/{{order_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "payments",
+                "{{order_id}}"
+              ]
+            },
+            "description": "Get Payment"
+          }
+        },
+        {
+          "name": "Sync Payment",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/payments/{{order_id}}/sync",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "payments",
+                "{{order_id}}",
+                "sync"
+              ]
+            },
+            "description": "Consulta o Mercado Pago agora, sem esperar o próximo ciclo de 15 s."
+          }
+        }
+      ]
+    }
+  ]
+}

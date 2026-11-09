@@ -1,0 +1,672 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "AutoGiro · Billing Service",
+    "description": "Cobrança: orçamentos, pagamentos com Mercado Pago e estornos.",
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/health": {
+      "get": {
+        "tags": [
+          "Health"
+        ],
+        "summary": "Health",
+        "operationId": "health_health_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health/live": {
+      "get": {
+        "tags": [
+          "Health"
+        ],
+        "summary": "Liveness",
+        "operationId": "liveness_health_live_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health/ready": {
+      "get": {
+        "tags": [
+          "Health"
+        ],
+        "summary": "Readiness",
+        "description": "Pronto para receber tráfego quando todas as dependências respondem.\n\nCada serviço registra suas verificações (banco, broker) em\n`app.state.readiness_checks`: um dicionário nome → função assíncrona que\ndevolve `True` quando a dependência está de pé.",
+        "operationId": "readiness_health_ready_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/metrics": {
+      "get": {
+        "tags": [
+          "Observabilidade"
+        ],
+        "summary": "Métricas no formato Prometheus",
+        "description": "Endpoint de scrape do Prometheus (agente do New Relic no cluster).",
+        "operationId": "metrics_metrics_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/plain; version=0.0.4; charset=utf-8": {}
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/budgets/{order_id}": {
+      "get": {
+        "tags": [
+          "Orçamentos"
+        ],
+        "summary": "Get Budget",
+        "description": "Orçamento da OS, com os serviços e as peças.",
+        "operationId": "get_budget_api_v1_budgets__order_id__get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "order_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Order Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BudgetResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/budgets/{order_id}/approve": {
+      "post": {
+        "tags": [
+          "Orçamentos"
+        ],
+        "summary": "Approve",
+        "description": "Aprova o orçamento e devolve o link de pagamento (Checkout Pro do Mercado Pago).\n\nSe o Mercado Pago não responder, devolve 502 e o orçamento continua pendente.",
+        "operationId": "approve_api_v1_budgets__order_id__approve_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "order_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Order Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/budgets/{order_id}/reject": {
+      "post": {
+        "tags": [
+          "Orçamentos"
+        ],
+        "summary": "Reject",
+        "description": "Recusa o orçamento: a Saga libera as peças e cancela a OS.",
+        "operationId": "reject_api_v1_budgets__order_id__reject_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "order_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Order Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BudgetResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/payments/{order_id}": {
+      "get": {
+        "tags": [
+          "Pagamentos"
+        ],
+        "summary": "Get Payment",
+        "operationId": "get_payment_api_v1_payments__order_id__get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "order_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Order Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaymentResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/payments/{order_id}/sync": {
+      "post": {
+        "tags": [
+          "Pagamentos"
+        ],
+        "summary": "Sync Payment",
+        "description": "Consulta o Mercado Pago agora, sem esperar o próximo ciclo de 15 s.",
+        "operationId": "sync_payment_api_v1_payments__order_id__sync_post",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "order_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Order Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaymentResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ApprovalResponse": {
+        "properties": {
+          "order_id": {
+            "type": "integer",
+            "title": "Order Id"
+          },
+          "budget_status": {
+            "$ref": "#/components/schemas/BudgetStatus"
+          },
+          "amount": {
+            "type": "number",
+            "title": "Amount"
+          },
+          "payment_link": {
+            "type": "string",
+            "title": "Payment Link"
+          },
+          "payment_expires_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Payment Expires At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "order_id",
+          "budget_status",
+          "amount",
+          "payment_link",
+          "payment_expires_at"
+        ],
+        "title": "ApprovalResponse"
+      },
+      "BudgetLineResponse": {
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/LineKind"
+          },
+          "reference_id": {
+            "type": "integer",
+            "title": "Reference Id"
+          },
+          "description": {
+            "type": "string",
+            "title": "Description"
+          },
+          "quantity": {
+            "type": "integer",
+            "title": "Quantity"
+          },
+          "unit_price": {
+            "type": "number",
+            "title": "Unit Price"
+          },
+          "subtotal": {
+            "type": "number",
+            "title": "Subtotal"
+          }
+        },
+        "type": "object",
+        "required": [
+          "kind",
+          "reference_id",
+          "description",
+          "quantity",
+          "unit_price",
+          "subtotal"
+        ],
+        "title": "BudgetLineResponse"
+      },
+      "BudgetResponse": {
+        "properties": {
+          "budget_id": {
+            "type": "integer",
+            "title": "Budget Id"
+          },
+          "order_id": {
+            "type": "integer",
+            "title": "Order Id"
+          },
+          "status": {
+            "$ref": "#/components/schemas/BudgetStatus"
+          },
+          "total": {
+            "type": "number",
+            "title": "Total"
+          },
+          "client_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Client Name"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
+          "decided_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decided At"
+          },
+          "lines": {
+            "items": {
+              "$ref": "#/components/schemas/BudgetLineResponse"
+            },
+            "type": "array",
+            "title": "Lines"
+          }
+        },
+        "type": "object",
+        "required": [
+          "budget_id",
+          "order_id",
+          "status",
+          "total",
+          "client_name",
+          "created_at",
+          "expires_at",
+          "decided_at",
+          "lines"
+        ],
+        "title": "BudgetResponse"
+      },
+      "BudgetStatus": {
+        "type": "string",
+        "enum": [
+          "PENDENTE",
+          "APROVADO",
+          "RECUSADO",
+          "EXPIRADO",
+          "CANCELADO"
+        ],
+        "title": "BudgetStatus"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "LineKind": {
+        "type": "string",
+        "enum": [
+          "SERVICO",
+          "PECA"
+        ],
+        "title": "LineKind"
+      },
+      "PaymentResponse": {
+        "properties": {
+          "payment_id": {
+            "type": "integer",
+            "title": "Payment Id"
+          },
+          "order_id": {
+            "type": "integer",
+            "title": "Order Id"
+          },
+          "status": {
+            "$ref": "#/components/schemas/PaymentStatus"
+          },
+          "amount": {
+            "type": "number",
+            "title": "Amount"
+          },
+          "payment_link": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Payment Link"
+          },
+          "mp_payment_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mp Payment Id"
+          },
+          "status_detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status Detail"
+          },
+          "refund_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Refund Id"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "payment_id",
+          "order_id",
+          "status",
+          "amount",
+          "payment_link",
+          "mp_payment_id",
+          "status_detail",
+          "refund_id",
+          "expires_at"
+        ],
+        "title": "PaymentResponse"
+      },
+      "PaymentStatus": {
+        "type": "string",
+        "enum": [
+          "PENDENTE",
+          "APROVADO",
+          "RECUSADO",
+          "EXPIRADO",
+          "CANCELADO",
+          "ESTORNADO",
+          "ESTORNO_PENDENTE"
+        ],
+        "title": "PaymentStatus"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      }
+    },
+    "securitySchemes": {
+      "HTTPBearer": {
+        "type": "http",
+        "description": "JWT emitido por autogiro-auth",
+        "scheme": "bearer"
+      }
+    }
+  }
+}
