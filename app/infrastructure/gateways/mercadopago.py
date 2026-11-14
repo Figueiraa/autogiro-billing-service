@@ -99,8 +99,14 @@ class MercadoPagoGateway(PaymentGatewayPort):
                     }
                 ],
                 "external_reference": external_reference,
+                # Boleto e pagamento em lotérica são pagos dias depois, fora da janela de
+                # pagamento tardio: o dinheiro entraria sem ninguém para estorná-lo.
+                "payment_methods": {"excluded_payment_types": [{"id": "ticket"}, {"id": "atm"}]},
                 "expires": True,
                 "expiration_date_to": _iso(expires_at),
+                # Prazo dos pagamentos em dinheiro: se algum escapar do filtro acima, ele
+                # vence junto com o link.
+                "date_of_expiration": _iso(expires_at),
             },
             idempotency_key=f"preferencia-{external_reference}",
         )

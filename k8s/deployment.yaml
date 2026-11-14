@@ -7,8 +7,8 @@ metadata:
     app: billing-service
     app.kubernetes.io/part-of: autogiro
 spec:
-  # O HPA assume o número de réplicas depois da criação.
-  replicas: 2
+  # Sem `replicas`: quem decide é o HPA (mínimo 2). Com o campo no manifesto,
+  # cada deploy voltaria a 2 réplicas e desfaria o que o HPA tivesse escalado.
   revisionHistoryLimit: 3
   selector:
     matchLabels:

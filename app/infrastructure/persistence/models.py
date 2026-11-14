@@ -1,6 +1,6 @@
 from datetime import UTC, datetime
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Integer, Numeric, String, Text
+from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Integer, Numeric, String, Text, false
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.domain.entities.budget import BudgetStatus, LineKind
@@ -65,6 +65,10 @@ class PaymentModel(Base):
     mp_payment_id: Mapped[str | None] = mapped_column(String(40))
     status_detail: Mapped[str | None] = mapped_column(String(100))
     refund_id: Mapped[str | None] = mapped_column(String(40))
+    # Estorno pendente por falha temporária: o monitor tenta de novo.
+    refund_retryable: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now)

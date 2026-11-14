@@ -74,6 +74,7 @@ class MercadoPagoFalso:
         self.preferencias: dict[str, dict] = {}
         self.pagamentos: dict[str, GatewayPayment] = {}
         self.estornos: list[tuple[str, str]] = []
+        self.tentativas_de_estorno = 0
         self.links_expirados: list[str] = []
         self.falhar_criacao = False
         self.falhar_consulta = False
@@ -94,6 +95,7 @@ class MercadoPagoFalso:
         return self.pagamentos.get(external_reference)
 
     async def refund(self, mp_payment_id, idempotency_key):
+        self.tentativas_de_estorno += 1
         if self.falhar_estorno:
             raise PaymentGatewayError("estorno falhou")
         if self.falhar_estorno_definitivo:

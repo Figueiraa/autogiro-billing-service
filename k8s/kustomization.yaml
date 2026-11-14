@@ -18,7 +18,7 @@ resources:
   - hpa.yaml
   - ingress.yaml
 
-# A pipeline troca a tag pelo hash do commit (`kustomize edit set image`), para que
+# A pipeline troca a tag pelo hash do commit (passo "Imagem do commit"), para que
 # cada deploy aponte para uma imagem imutável.
 images:
   - name: ghcr.io/figueiraa/autogiro-billing-service

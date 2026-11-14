@@ -8,12 +8,17 @@ import asyncio
 import json
 import os
 import uuid
+from datetime import UTC, datetime, timedelta
 
 import aio_pika
 import asyncpg
 import pytest
+from sqlalchemy import select, text
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.application.messages import EXCHANGE_COMMANDS, EXCHANGE_EVENTS, Envelope
+from app.application.use_cases.billing import BillingPolicy, BillingService
+from app.domain.entities.budget import BudgetStatus
 from app.infrastructure import composition
 from app.infrastructure.config import settings
 from app.infrastructure.gateways.mercadopago import DisabledPaymentGateway, MercadoPagoGateway
@@ -21,6 +26,8 @@ from app.infrastructure.messaging.consumer import RETRY_HEADER, QueueConsumer
 from app.infrastructure.messaging.rabbitmq import RabbitMQClient, dead_letter_queue
 from app.infrastructure.messaging.runtime import QUEUE_COMMANDS, MessagingRuntime, publish_pending, run_every
 from app.infrastructure.migrations import migrate, to_asyncpg_dsn
+from app.infrastructure.persistence.models import OutboxMessage
+from app.infrastructure.persistence.repositories import SqlBudgetRepository, SqlOutbox, unit_of_work_factory
 
 POSTGRES_URL = os.getenv("TEST_POSTGRES_URL")
 RABBITMQ_URL = os.getenv("TEST_RABBITMQ_URL")
@@ -70,7 +77,11 @@ class TestMigrations:
         await conn.close()
 
     async def test_aplica_uma_vez_e_cria_as_tabelas(self, banco_limpo):
-        assert await migrate(POSTGRES_URL) == ["001_schema_inicial.sql", "002_contexto_de_rastreamento.sql"]
+        assert await migrate(POSTGRES_URL) == [
+            "001_schema_inicial.sql",
+            "002_contexto_de_rastreamento.sql",
+            "003_estorno_com_nova_tentativa.sql",
+        ]
         assert await migrate(POSTGRES_URL) == []
 
         tabelas = {
@@ -89,6 +100,96 @@ class TestMigrations:
             await banco_limpo.execute(
                 "INSERT INTO budgets (order_id, saga_id, total, status) VALUES (1, 's', 0, 'PENDENTE')"
             )
+
+
+@pytest.fixture
+async def fabrica_postgres():
+    """Sessões num PostgreSQL limpo, com as migrations aplicadas."""
+    conn = await asyncpg.connect(to_asyncpg_dsn(POSTGRES_URL))
+    await conn.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
+    await conn.close()
+    await migrate(POSTGRES_URL)
+    engine = create_async_engine(POSTGRES_URL)
+    yield async_sessionmaker(engine, expire_on_commit=False)
+    await engine.dispose()
+
+
+async def _gravar_eventos(fabrica, quantidade: int) -> list[str]:
+    async with fabrica() as db:
+        outbox = SqlOutbox(db)
+        envelopes = [
+            Envelope.event("OrcamentoGerado", saga_id="s", order_id=i, payload={}) for i in range(quantidade)
+        ]
+        for envelope in envelopes:
+            await outbox.add(envelope)
+        await db.commit()
+    return [envelope.message_id for envelope in envelopes]
+
+
+def _gerar(order_id: int) -> Envelope:
+    return Envelope.command(
+        "GerarOrcamento",
+        saga_id="s",
+        order_id=order_id,
+        payload={"client": {}, "services": [{"service_type_id": 1, "name": "A", "quantity": 1, "unit_price": 10}]},
+    )
+
+
+@precisa_postgres
+class TestConcorrenciaNoPostgres:
+    async def test_publicador_mantem_a_trava_de_cada_evento_ate_marca_lo(self, fabrica_postgres):
+        ids = await _gravar_eventos(fabrica_postgres, 3)
+        livres_durante = []
+
+        async def publicar(exchange, routing_key, body, *, message_id, message_type, headers=None):
+            # Outra réplica, enquanto este evento é publicado: o que ela conseguiria travar?
+            async with fabrica_postgres() as outra:
+                linhas = await outra.execute(
+                    text(
+                        "SELECT message_id FROM outbox WHERE published_at IS NULL "
+                        "ORDER BY id FOR UPDATE SKIP LOCKED"
+                    )
+                )
+                livres_durante.append((message_id, [linha[0] for linha in linhas]))
+
+        assert await publish_pending(fabrica_postgres, publicar) == 3
+
+        # O evento em publicação nunca fica livre para outra réplica publicar junto.
+        assert livres_durante == [(ids[0], ids[1:]), (ids[1], ids[2:]), (ids[2], [])]
+
+    async def test_monitor_nao_expira_orcamento_aprovado_depois_da_leitura(
+        self, fabrica_postgres, mercado_pago, monkeypatch
+    ):
+        billing = BillingService(unit_of_work_factory(fabrica_postgres), mercado_pago, None, BillingPolicy())
+        await billing.handle_command(_gerar(7))
+        listar = SqlBudgetRepository.list_expired_pending
+
+        async def listar_e_o_cliente_aprova(self, now):
+            vencidos = await listar(self, now)
+            await billing.approve(7)  # outra transação aprova e confirma logo depois da leitura
+            return vencidos
+
+        monkeypatch.setattr(SqlBudgetRepository, "list_expired_pending", listar_e_o_cliente_aprova)
+
+        resultado = await billing.run_monitor(datetime.now(UTC) + timedelta(days=2))
+
+        assert "OrcamentoExpirado" not in resultado.events
+        assert (await billing.get_budget(7)).status == BudgetStatus.APROVADO
+
+    async def test_estorno_pendente_com_nova_tentativa_fica_gravado(self, fabrica_postgres, mercado_pago):
+        billing = BillingService(unit_of_work_factory(fabrica_postgres), mercado_pago, None, BillingPolicy())
+        await billing.handle_command(_gerar(8))
+        _, pagamento = await billing.approve(8)
+        mercado_pago.pagar(pagamento.external_reference, "approved", mp_id="mp-1")
+        await billing.sync_payment(8)
+        mercado_pago.falhar_estorno = True
+
+        await billing.handle_command(Envelope.command("CancelarCobranca", saga_id="s", order_id=8, payload={}))
+
+        assert (await billing.get_payment(8)).refund_retryable is True
+        mercado_pago.falhar_estorno = False
+        assert (await billing.run_monitor()).events == ["EstornoRealizado"]
+        assert (await billing.get_payment(8)).refund_retryable is False
 
 
 # ─── RabbitMQ ───────────────────────────────────────────────────────────────
@@ -193,6 +294,35 @@ class TestOutboxELaco:
         assert await publish_pending(session_factory, publicar) == 1
         assert await publish_pending(session_factory, publicar) == 0
         assert publicadas == [("billing.orcamento-gerado", "OrcamentoGerado")]
+
+    async def test_falha_no_meio_preserva_o_que_ja_saiu(self, session_factory):
+        ids = await _gravar_eventos(session_factory, 3)
+        publicadas = []
+
+        async def publicar(exchange, routing_key, body, *, message_id, message_type, headers=None):
+            if message_id == ids[1]:
+                raise ConnectionError("broker caiu")
+            publicadas.append(message_id)
+
+        with pytest.raises(ConnectionError):
+            await publish_pending(session_factory, publicar)
+
+        async with session_factory() as db:
+            pendentes = (
+                await db.execute(select(OutboxMessage.message_id).where(OutboxMessage.published_at.is_(None)))
+            ).scalars().all()
+        assert (publicadas, list(pendentes)) == ([ids[0]], ids[1:])
+
+    async def test_publica_no_maximo_o_limite_por_chamada(self, session_factory):
+        ids = await _gravar_eventos(session_factory, 3)
+        publicadas = []
+
+        async def publicar(exchange, routing_key, body, *, message_id, message_type, headers=None):
+            publicadas.append(message_id)
+
+        assert await publish_pending(session_factory, publicar, limit=2) == 2
+        assert await publish_pending(session_factory, publicar, limit=2) == 1
+        assert publicadas == ids
 
     async def test_laco_continua_quando_a_tarefa_falha(self):
         execucoes, segunda = [], asyncio.Event()

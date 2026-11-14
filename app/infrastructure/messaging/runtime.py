@@ -31,10 +31,17 @@ Publish = Callable[..., Awaitable[None]]
 async def publish_pending(
     session_factory: async_sessionmaker[AsyncSession], publish: Publish, limit: int = 100
 ) -> int:
-    """Publica os eventos pendentes do outbox, na ordem em que foram gravados."""
+    """Publica os eventos pendentes do outbox, na ordem em que foram gravados.
+
+    Um evento por transação (travar, publicar, marcar, confirmar): a trava de cada um
+    vale até ele ser marcado como publicado. Até `limit` eventos por chamada.
+    """
     published = 0
-    async with session_factory() as db:
-        for row in await SqlOutbox(db).pending(limit):
+    while published < limit:
+        async with session_factory() as db:
+            row = await SqlOutbox(db).next_pending()
+            if row is None:
+                break
             with publish_span(
                 exchange=row.exchange,
                 routing_key=row.routing_key,

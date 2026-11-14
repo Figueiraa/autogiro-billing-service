@@ -40,6 +40,22 @@ class TestPreferencia:
         assert (corpo["expires"], corpo["expiration_date_to"]) == (True, "2026-11-10T18:00:00.000+00:00")
         assert "payer" not in corpo
 
+    async def test_aceita_so_meios_que_confirmam_dentro_do_prazo(self):
+        # Boleto (ticket) e lotérica (atm) são pagos dias depois, fora da janela de
+        # pagamento tardio: o dinheiro entraria sem ninguém para estorná-lo.
+        corpos = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            corpos.append(json.loads(request.content))
+            return httpx.Response(201, json={"id": "pref-1", "init_point": "https://mp/pagar"})
+
+        await _gateway(handler).create_preference(
+            external_reference="r", title="OS 7", amount=10, payer_email=None, expires_at=EXPIRA
+        )
+
+        assert corpos[0]["payment_methods"] == {"excluded_payment_types": [{"id": "ticket"}, {"id": "atm"}]}
+        assert corpos[0]["date_of_expiration"] == corpos[0]["expiration_date_to"] == "2026-11-10T18:00:00.000+00:00"
+
     async def test_usa_o_link_configurado(self):
         def handler(_):
             return httpx.Response(201, json={"id": "p", "init_point": "https://mp/pagar", "sandbox_init_point": "https://sandbox/pagar"})
