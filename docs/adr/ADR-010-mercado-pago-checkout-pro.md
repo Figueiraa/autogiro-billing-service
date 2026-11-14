@@ -25,10 +25,12 @@ Também não há front-end próprio: o cliente interage pela API.
 | Vínculo | `external_reference` única por pagamento, `autogiro-os-<order_id>-<12 hex>`, enviada na preferência e usada na busca |
 | Confirmação | **Consulta periódica** a cada `PAYMENT_POLL_SECONDS` (padrão 15 s): `GET /v1/payments/search?external_reference=…`. O endpoint `POST /api/v1/payments/{order_id}/sync` força a consulta na hora |
 | Expiração | A preferência é criada com `expires: true` e `expiration_date_to` = aprovação + `PAYMENT_TIMEOUT_MINUTES`. Vencido o prazo sem pagamento, o Billing emite `PagamentoExpirado` e encerra o link |
-| Pagamento tardio | Pagamentos expirados ou cancelados continuam sendo consultados por `LATE_PAYMENT_WINDOW_HOURS` (padrão 24 h). Um pagamento aprovado que aparece nesse período é informado à Saga, que manda estornar |
+| Tentativa recusada | Não encerra a cobrança: o cliente pode tentar outro cartão no mesmo link até o prazo. Vencido o prazo sem pagamento aprovado e com tentativa recusada, o Billing emite `PagamentoRecusado` |
+| Meios de pagamento | Boleto e lotérica (`ticket`, `atm`) excluídos da preferência: são pagos dias depois, fora da janela de pagamento tardio |
+| Pagamento tardio | Pagamentos recusados, expirados ou cancelados continuam sendo consultados por `LATE_PAYMENT_WINDOW_HOURS` (padrão 24 h). Um pagamento aprovado que aparece nesse período é informado à Saga, que manda estornar |
 | Compensação | **Estorno total** (`POST /v1/payments/{id}/refunds`, chave de idempotência fixa por pagamento) quando o pagamento já foi aprovado; encerramento do link quando ainda não foi |
 | Erros do gateway | Cada falha vira `PaymentGatewayError` com `retryable`: rede, tempo esgotado, HTTP 5xx e 429 são temporárias; os demais 4xx são recusa definitiva |
-| Estorno recusado em definitivo | O pagamento fica `ESTORNO_PENDENTE`, a compensação é confirmada para a Saga não travar e o monitor concilia quando o estorno manual aparece no Mercado Pago |
+| Estorno que falha | O pagamento fica `ESTORNO_PENDENTE` e a compensação é confirmada para a Saga não travar. Falha temporária: o monitor refaz o estorno. Recusa definitiva: o monitor concilia quando o estorno manual aparece no Mercado Pago |
 | Ambiente | **Sandbox**: credenciais de teste, vendedor e comprador de teste, cartões de teste que forçam aprovação ou recusa |
 | Testes automatizados | O Mercado Pago fica atrás da porta `PaymentGatewayPort`; o CI usa um dublê e **não depende do sandbox** |
 
@@ -40,8 +42,8 @@ e usa quatro endpoints:
 
 | Endpoint | Uso |
 |---|---|
-| `POST /checkout/preferences` | Cria a cobrança: um item com o título da OS, quantidade 1, valor do orçamento em `BRL`, `external_reference` e expiração. Chave de idempotência `preferencia-<external_reference>` |
-| `PUT /checkout/preferences/{id}` | Encerra o link (`expiration_date_to` = agora) quando o pagamento é recusado, expira ou é cancelado. Melhor esforço: a falha só é registrada em log |
+| `POST /checkout/preferences` | Cria a cobrança: um item com o título da OS, quantidade 1, valor do orçamento em `BRL`, `external_reference`, expiração e `excluded_payment_types` (`ticket`, `atm`). Chave de idempotência `preferencia-<external_reference>` |
+| `PUT /checkout/preferences/{id}` | Encerra o link (`expiration_date_to` = agora) quando o prazo de pagamento vence ou a cobrança é cancelada. Melhor esforço: a falha só é registrada em log |
 | `GET /v1/payments/search` | Busca os pagamentos da referência, do mais recente para o mais antigo. Um aprovado prevalece sobre tentativas recusadas |
 | `POST /v1/payments/{id}/refunds` | Estorno total, com chave de idempotência `estorno-<external_reference>` |
 
@@ -65,10 +67,10 @@ O tratamento de `retryable` nos casos de uso
   orçamento continua `PENDENTE`.
 - **Consulta (monitor e `/sync`):** a falha é registrada e o pagamento é consultado de novo no
   ciclo seguinte. A expiração também espera uma consulta bem-sucedida.
-- **Estorno:** falha temporária sobe como exceção; o comando `CancelarCobranca` volta pela fila
-  de retry e, esgotadas as tentativas, vai para a DLQ. Recusa definitiva leva o pagamento a
-  `ESTORNO_PENDENTE`, registra `ESTORNO MANUAL NECESSÁRIO` no log e confirma a compensação
-  com `estorno_pendente: true`.
+- **Estorno:** qualquer falha leva o pagamento a `ESTORNO_PENDENTE` e confirma a compensação
+  com `estorno_pendente: true` (com a Saga já compensada, um comando na DLQ não seria
+  reenviado). Falha temporária: o monitor refaz o estorno com a mesma chave de idempotência.
+  Recusa definitiva: não é repetida; o log registra `ESTORNO MANUAL NECESSÁRIO`.
 
 ### API de Preferences
 
@@ -105,8 +107,9 @@ Comportamentos verificados no sandbox, que mudaram a forma de testar e o tratame
   pagamento expirado ou cancelado dentro da janela de pagamento tardio.
 - No sandbox atual, o estorno depende de um passo manual no painel. O estorno pendente fica
   visível no status do pagamento e no log.
-- Uma tentativa recusada encerra a cobrança: o cliente não tenta outro cartão no mesmo link, e
-  a Saga cancela a OS.
+- Uma tentativa recusada só vira `PagamentoRecusado` quando o prazo de pagamento vence: a
+  Saga espera até `PAYMENT_TIMEOUT_MINUTES` para cancelar a OS.
+- Sem boleto nem lotérica: só meios que confirmam dentro do prazo.
 
 ## Alternativas consideradas
 

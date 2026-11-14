@@ -26,8 +26,8 @@ IGNORED = "ignored"
 class BillingPolicy:
     approval_timeout: timedelta = timedelta(hours=24)
     payment_timeout: timedelta = timedelta(hours=1)
-    # Por quanto tempo um pagamento expirado ou cancelado ainda é consultado: se o
-    # cliente pagou no último instante, a confirmação tardia dispara o estorno.
+    # Por quanto tempo um pagamento recusado, expirado ou cancelado ainda é consultado:
+    # se o cliente pagou no último instante, a confirmação tardia dispara o estorno.
     late_payment_window: timedelta = timedelta(hours=24)
 
 
@@ -131,25 +131,33 @@ class BillingService:
     async def _refund(self, payment: Payment, now: datetime) -> tuple[bool, str | None]:
         """Estorna no provedor.
 
-        Falha temporária sobe (retry e DLQ). Recusa definitiva deixa o estorno
-        pendente, para ser feito manualmente e conciliado depois, sem travar a Saga.
+        Se falhar, o estorno fica pendente e a compensação é confirmada mesmo assim:
+        com a Saga já compensada, ninguém reenviaria um comando que fosse para a DLQ.
+        Falha temporária o monitor tenta de novo; recusa definitiva é feita
+        manualmente e conciliada depois.
         """
         try:
-            # Chave de idempotência fixa: repetir o comando não estorna duas vezes.
+            # Chave de idempotência fixa: repetir o estorno não estorna duas vezes.
             refund_id = await self._gateway.refund(
                 payment.mp_payment_id, f"estorno-{payment.external_reference}"
             )
         except PaymentGatewayError as exc:
+            payment.refund_pending(str(exc), now, retryable=exc.retryable)
             if exc.retryable:
-                raise
-            payment.refund_pending(str(exc), now)
-            logger.error(
-                "ESTORNO MANUAL NECESSÁRIO: pagamento %s da OS %s (R$ %.2f) — %s",
-                payment.mp_payment_id,
-                payment.order_id,
-                payment.amount,
-                exc,
-            )
+                logger.warning(
+                    "Estorno do pagamento %s da OS %s falhou; o monitor tenta de novo: %s",
+                    payment.mp_payment_id,
+                    payment.order_id,
+                    exc,
+                )
+            else:
+                logger.error(
+                    "ESTORNO MANUAL NECESSÁRIO: pagamento %s da OS %s (R$ %.2f) — %s",
+                    payment.mp_payment_id,
+                    payment.order_id,
+                    payment.amount,
+                    exc,
+                )
             return False, None
         payment.refund(refund_id, now)
         return True, refund_id
@@ -232,11 +240,12 @@ class BillingService:
         result = MonitorResult()
 
         async with self._uow() as uow:
-            for budget in await uow.budgets.list_expired_pending(moment):
-                budget.expire(moment)
-                await uow.budgets.save(budget)
-                await uow.outbox.add(_event("OrcamentoExpirado", budget, {"budget_id": budget.id}))
+            candidates = await uow.budgets.list_expired_pending(moment)
+        for candidate in candidates:
+            if await self._expire_budget(candidate.order_id, moment):
                 result.events.append("OrcamentoExpirado")
+
+        async with self._uow() as uow:
             watched = await uow.payments.list_to_watch(moment - self._policy.late_payment_window)
 
         for candidate in watched:
@@ -248,6 +257,21 @@ class BillingService:
                         result.events.append(event)
         return result
 
+    async def _expire_budget(self, order_id: int, now: datetime) -> bool:
+        """Expira o orçamento relido com trava, numa transação própria.
+
+        A lista do monitor é lida sem trava: o cliente pode ter aprovado ou recusado
+        depois dela, e essa decisão não pode ser sobrescrita.
+        """
+        async with self._uow() as uow:
+            budget = await uow.budgets.get_by_order(order_id)
+            if budget is None or not budget.is_expired(now):
+                return False
+            budget.expire(now)
+            await uow.budgets.save(budget)
+            await uow.outbox.add(_event("OrcamentoExpirado", budget, {"budget_id": budget.id}))
+        return True
+
     async def _check_payment(self, uow: UnitOfWorkPort, payment: Payment, now: datetime) -> str | None:
         try:
             found = await self._gateway.find_payment(payment.external_reference)
@@ -258,44 +282,81 @@ class BillingService:
         if payment.status == PaymentStatus.ESTORNO_PENDENTE:
             return await self._reconcile_refund(uow, payment, found, now)
 
-        late = payment.status in (PaymentStatus.EXPIRADO, PaymentStatus.CANCELADO)
+        late = payment.status in (PaymentStatus.RECUSADO, PaymentStatus.EXPIRADO, PaymentStatus.CANCELADO)
         if found is not None and found.approved and (payment.status == PaymentStatus.PENDENTE or late):
-            payment.confirm(found.id, now)
+            payment.confirm(found.id, now, found.status_detail)
             event_type = "PagamentoConfirmado"
             payload = {"payment_id": payment.id, "mp_payment_id": found.id, "amount": payment.amount}
             if late:
                 logger.warning("Pagamento tardio na OS %s: a Saga vai estornar", payment.order_id)
-        elif found is not None and found.rejected and payment.status == PaymentStatus.PENDENTE:
-            payment.reject(found.id, found.status_detail, now)
-            event_type = "PagamentoRecusado"
-            payload = {
-                "payment_id": payment.id,
-                "mp_payment_id": found.id,
-                "status_detail": found.status_detail,
-            }
-            await self._expire_link(payment)
-        elif payment.is_expired(now):
-            payment.expire(now)
-            event_type = "PagamentoExpirado"
-            payload = {"payment_id": payment.id}
-            await self._expire_link(payment)
-        else:
+        elif payment.status != PaymentStatus.PENDENTE:
             return None
+        else:
+            event_type, payload = await self._check_pending(uow, payment, found, now)
+            if event_type is None:
+                return None
 
         await uow.payments.save(payment)
         await uow.outbox.add(_event(event_type, payment, payload))
         return event_type
 
+    async def _check_pending(self, uow: UnitOfWorkPort, payment: Payment, found, now: datetime):
+        """Pagamento ainda sem aprovação.
+
+        Uma tentativa recusada não encerra o pagamento: no Checkout Pro o cliente pode
+        tentar outro cartão no mesmo link até o prazo. A recusa só vale no fim dele.
+        """
+        new_rejection = (
+            found is not None
+            and found.rejected
+            and (found.id, found.status_detail) != (payment.mp_payment_id, payment.status_detail)
+        )
+        if new_rejection:
+            payment.record_rejection(found.id, found.status_detail, now)
+            logger.info(
+                "Tentativa de pagamento recusada na OS %s (%s); o link segue aberto",
+                payment.order_id,
+                found.status_detail,
+            )
+        if not payment.is_expired(now):
+            if new_rejection:
+                await uow.payments.save(payment)
+            return None, None
+
+        if payment.rejected_attempt:
+            payment.reject(payment.mp_payment_id, payment.status_detail, now)
+            event = "PagamentoRecusado", {
+                "payment_id": payment.id,
+                "mp_payment_id": payment.mp_payment_id,
+                "status_detail": payment.status_detail,
+            }
+        else:
+            payment.expire(now)
+            event = "PagamentoExpirado", {"payment_id": payment.id}
+        await self._expire_link(payment)
+        return event
+
     async def _reconcile_refund(
         self, uow: UnitOfWorkPort, payment: Payment, found, now: datetime
     ) -> str | None:
-        """Estorno feito manualmente no painel do Mercado Pago: registra quando ele aparece."""
-        if found is None or not found.refunded:
+        """Estorno pendente: concilia o que já aparece estornado; senão, tenta de novo se valer a pena.
+
+        Recusa definitiva não é repetida (daria o mesmo erro a cada ciclo): espera o
+        estorno manual no painel do Mercado Pago.
+        """
+        if found is not None and found.refunded:
+            payment.refund("manual", now)
+            await uow.payments.save(payment)
+            logger.info("Estorno manual do pagamento %s conciliado", payment.mp_payment_id)
+            return "EstornoConciliado"
+        if not payment.refund_retryable:
             return None
-        payment.refund("manual", now)
+        refunded, _ = await self._refund(payment, now)
         await uow.payments.save(payment)
-        logger.info("Estorno manual do pagamento %s conciliado", payment.mp_payment_id)
-        return "EstornoConciliado"
+        if not refunded:
+            return None
+        logger.info("Estorno do pagamento %s feito na nova tentativa", payment.mp_payment_id)
+        return "EstornoRealizado"
 
     # ─── Auxiliares ─────────────────────────────────────────────────────────
     async def _open_budget(self, uow: UnitOfWorkPort, order_id: int, now: datetime) -> Budget:

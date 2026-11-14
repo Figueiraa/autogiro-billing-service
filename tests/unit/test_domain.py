@@ -43,6 +43,10 @@ class TestGeracao:
             ([], [], "não tem serviços nem peças"),
             (SERVICOS, [{"part_id": 2, "name": "Filtro", "quantity": 1, "unit_price": None}], "Preço ausente"),
             ([{"service_type_id": 1, "name": "Cortesia", "quantity": 1, "unit_price": 0}], [], "maior que zero"),
+            # Total positivo, mas com linha que o banco recusaria (CHECK nas linhas).
+            (SERVICOS, [{"part_id": 2, "name": "Desconto", "quantity": 1, "unit_price": -10}], "Preço negativo"),
+            (SERVICOS, [{"part_id": 2, "name": "Filtro", "quantity": 0, "unit_price": 10}], "Quantidade inválida"),
+            (SERVICOS, [{"part_id": 2, "name": "Filtro", "quantity": -1, "unit_price": 10}], "Quantidade inválida"),
         ],
     )
     def test_dados_invalidos_nao_geram_orcamento(self, servicos, pecas, mensagem):
@@ -102,10 +106,38 @@ class TestPagamento:
         pagamento.reject("mp-2", "cc_rejected_other_reason", T0)
         assert (pagamento.status, pagamento.status_detail) == (PaymentStatus.RECUSADO, "cc_rejected_other_reason")
 
-    @pytest.mark.parametrize("encerrar", ["expire", "cancel"])
+    def test_tentativa_recusada_fica_registrada_sem_encerrar(self):
+        pagamento = _pagamento()
+        assert not pagamento.rejected_attempt
+
+        pagamento.record_rejection("mp-2", "cc_rejected_other_reason", T0)
+
+        assert (pagamento.status, pagamento.mp_payment_id, pagamento.status_detail) == (
+            PaymentStatus.PENDENTE,
+            "mp-2",
+            "cc_rejected_other_reason",
+        )
+        assert pagamento.rejected_attempt
+        pagamento.confirm("mp-3", T0, "accredited")
+        assert (pagamento.status, pagamento.status_detail, pagamento.rejected_attempt) == (
+            PaymentStatus.APROVADO,
+            "accredited",
+            False,
+        )
+
+    def test_tentativa_recusada_so_com_pagamento_pendente(self):
+        pagamento = _pagamento()
+        pagamento.expire(T0)
+        with pytest.raises(InvalidStatusTransitionError):
+            pagamento.record_rejection("mp-2", "x", T0)
+
+    @pytest.mark.parametrize("encerrar", ["expire", "cancel", "reject"])
     def test_pagamento_tardio_ainda_pode_ser_confirmado(self, encerrar):
         pagamento = _pagamento()
-        getattr(pagamento, encerrar)(T0)
+        if encerrar == "reject":
+            pagamento.reject("mp-2", "cc_rejected_other_reason", T0)
+        else:
+            getattr(pagamento, encerrar)(T0)
 
         pagamento.confirm("mp-3", T0)
 
@@ -118,6 +150,25 @@ class TestPagamento:
         assert (pagamento.status, pagamento.status_detail) == (PaymentStatus.ESTORNO_PENDENTE, "Mercado Pago respondeu 401")
         pagamento.refund("manual", T0)
         assert pagamento.status == PaymentStatus.ESTORNADO
+
+    def test_estorno_pendente_por_falha_temporaria_e_tentado_de_novo(self):
+        pagamento = _pagamento()
+        pagamento.confirm("mp-1", T0)
+        pagamento.refund_pending("Mercado Pago respondeu 503", T0, retryable=True)
+        assert (pagamento.status, pagamento.refund_retryable) == (PaymentStatus.ESTORNO_PENDENTE, True)
+
+        # Nova falha de quem já está pendente só atualiza o motivo e a marca.
+        pagamento.refund_pending("Mercado Pago respondeu 401", T0 + timedelta(minutes=1))
+        assert (pagamento.status, pagamento.status_detail, pagamento.refund_retryable) == (
+            PaymentStatus.ESTORNO_PENDENTE,
+            "Mercado Pago respondeu 401",
+            False,
+        )
+        assert pagamento.updated_at == T0 + timedelta(minutes=1)
+
+        pagamento.refund_pending("Mercado Pago respondeu 503", T0, retryable=True)
+        pagamento.refund("refund-1", T0)
+        assert (pagamento.status, pagamento.refund_retryable) == (PaymentStatus.ESTORNADO, False)
 
     def test_estorno_so_de_pagamento_aprovado(self):
         with pytest.raises(InvalidStatusTransitionError):

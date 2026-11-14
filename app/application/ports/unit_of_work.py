@@ -31,7 +31,8 @@ class PaymentRepositoryPort(Protocol):
     async def save(self, payment: Payment) -> None: ...
 
     async def list_to_watch(self, late_since: datetime) -> list[Payment]:
-        """Pendentes, e expirados ou cancelados recentes (um pagamento tardio ainda pode chegar)."""
+        """Pendentes, estornos pendentes e recusados, expirados ou cancelados recentes
+        (um pagamento tardio ainda pode chegar)."""
         ...
 
 

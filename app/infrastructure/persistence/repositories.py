@@ -54,8 +54,11 @@ class SqlBudgetRepository:
             select(BudgetModel)
             .options(selectinload(BudgetModel.lines))
             .where(BudgetModel.order_id == order_id)
-            # Aprovação e cancelamento simultâneos do mesmo orçamento: um espera o outro.
+            # Aprovação, cancelamento e expiração simultâneos do mesmo orçamento: um espera
+            # o outro. `populate_existing` traz o status gravado por quem segurava a trava,
+            # e não o que já estava carregado na sessão.
             .with_for_update()
+            .execution_options(populate_existing=True)
         )
         return result.scalar_one_or_none()
 
@@ -97,6 +100,7 @@ class SqlBudgetRepository:
         await self._db.flush()
 
     async def list_expired_pending(self, now: datetime) -> list[Budget]:
+        # Leitura sem trava: só aponta os candidatos. Quem expira relê cada um travado.
         result = await self._db.execute(
             select(BudgetModel)
             .options(selectinload(BudgetModel.lines))
@@ -119,6 +123,7 @@ _PAYMENT_FIELDS = (
     "mp_payment_id",
     "status_detail",
     "refund_id",
+    "refund_retryable",
     "expires_at",
 )
 
@@ -139,7 +144,10 @@ class SqlPaymentRepository:
 
     async def _model_by_id(self, payment_id: int) -> PaymentModel:
         result = await self._db.execute(
-            select(PaymentModel).where(PaymentModel.id == payment_id).with_for_update()
+            select(PaymentModel)
+            .where(PaymentModel.id == payment_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
         )
         return result.scalar_one()
 
@@ -150,6 +158,7 @@ class SqlPaymentRepository:
             .order_by(PaymentModel.id.desc())
             .limit(1)
             .with_for_update()
+            .execution_options(populate_existing=True)
         )
         model = result.scalar_one_or_none()
         return _payment_from(model) if model else None
@@ -178,7 +187,9 @@ class SqlPaymentRepository:
             .where(
                 or_(
                     PaymentModel.status.in_([PaymentStatus.PENDENTE, PaymentStatus.ESTORNO_PENDENTE]),
-                    (PaymentModel.status.in_([PaymentStatus.EXPIRADO, PaymentStatus.CANCELADO]))
+                    PaymentModel.status.in_(
+                        [PaymentStatus.RECUSADO, PaymentStatus.EXPIRADO, PaymentStatus.CANCELADO]
+                    )
                     & (PaymentModel.updated_at >= late_since),
                 )
             )
@@ -206,16 +217,21 @@ class SqlOutbox:
             )
         )
 
-    async def pending(self, limit: int = 100) -> list[OutboxMessage]:
+    async def next_pending(self) -> OutboxMessage | None:
+        """O evento pendente mais antigo que nenhuma outra réplica está publicando.
+
+        A trava dura só até o commit da transação. Por isso é um evento por transação:
+        travar um lote e confirmar item a item soltaria os demais na primeira confirmação,
+        e outra réplica poderia publicá-los junto.
+        """
         result = await self._db.execute(
             select(OutboxMessage)
             .where(OutboxMessage.published_at.is_(None))
             .order_by(OutboxMessage.id)
-            .limit(limit)
-            # Cada réplica publica só o que nenhuma outra pegou.
+            .limit(1)
             .with_for_update(skip_locked=True)
         )
-        return list(result.scalars().all())
+        return result.scalar_one_or_none()
 
 
 class SqlInbox:
