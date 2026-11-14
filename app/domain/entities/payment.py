@@ -15,21 +15,23 @@ class PaymentStatus(str, enum.Enum):
     EXPIRADO = "EXPIRADO"
     CANCELADO = "CANCELADO"
     ESTORNADO = "ESTORNADO"
-    # O provedor recusou o estorno: precisa ser feito manualmente e é conciliado depois.
+    # O estorno não saiu: o monitor tenta de novo (falha temporária) ou espera o
+    # estorno manual (recusa definitiva) e o concilia depois.
     ESTORNO_PENDENTE = "ESTORNO_PENDENTE"
 
 
 S = PaymentStatus
 
 _TRANSITIONS: dict[PaymentStatus, set[PaymentStatus]] = {
-    # Expirado ou cancelado ainda pode virar aprovado: o cliente pagou no último
-    # instante e a confirmação chegou depois. A Saga estorna esse pagamento tardio.
+    # Recusado, expirado ou cancelado ainda pode virar aprovado: o cliente pagou no
+    # último instante (ou tentou outro cartão) e a confirmação chegou depois. A Saga
+    # estorna esse pagamento tardio.
     S.PENDENTE: {S.APROVADO, S.RECUSADO, S.EXPIRADO, S.CANCELADO},
+    S.RECUSADO: {S.APROVADO},
     S.EXPIRADO: {S.APROVADO},
     S.CANCELADO: {S.APROVADO},
     S.APROVADO: {S.ESTORNADO, S.ESTORNO_PENDENTE},
     S.ESTORNO_PENDENTE: {S.ESTORNADO},
-    S.RECUSADO: set(),
     S.ESTORNADO: set(),
 }
 
@@ -52,14 +54,35 @@ class Payment:
     mp_payment_id: str | None = None
     status_detail: str | None = None
     refund_id: str | None = None
+    # Estorno pendente por falha temporária: o monitor tenta de novo. Recusa
+    # definitiva fica False, para não repetir a chamada que sempre falha.
+    refund_retryable: bool = False
     expires_at: datetime | None = None
     id: int | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = field(default=None)
 
-    def confirm(self, mp_payment_id: str, now: datetime | None = None) -> None:
+    @property
+    def rejected_attempt(self) -> bool:
+        """Houve tentativa recusada e o prazo ainda corre: o cliente pode tentar outro cartão."""
+        return self.status == S.PENDENTE and self.mp_payment_id is not None
+
+    def confirm(
+        self, mp_payment_id: str, now: datetime | None = None, status_detail: str | None = None
+    ) -> None:
         self._move(S.APROVADO, now)
         self.mp_payment_id = mp_payment_id
+        self.status_detail = status_detail
+
+    def record_rejection(
+        self, mp_payment_id: str, status_detail: str | None, now: datetime | None = None
+    ) -> None:
+        """Tentativa recusada no checkout. Não encerra o pagamento: o link segue aberto até o prazo."""
+        if self.status != S.PENDENTE:
+            raise InvalidStatusTransitionError("Pagamento", self.status.value, S.PENDENTE.value)
+        self.mp_payment_id = mp_payment_id
+        self.status_detail = status_detail
+        self.updated_at = now or datetime.now(UTC)
 
     def reject(self, mp_payment_id: str, status_detail: str | None, now: datetime | None = None) -> None:
         self._move(S.RECUSADO, now)
@@ -75,10 +98,16 @@ class Payment:
     def refund(self, refund_id: str, now: datetime | None = None) -> None:
         self._move(S.ESTORNADO, now)
         self.refund_id = refund_id
+        self.refund_retryable = False
 
-    def refund_pending(self, reason: str, now: datetime | None = None) -> None:
-        self._move(S.ESTORNO_PENDENTE, now)
+    def refund_pending(self, reason: str, now: datetime | None = None, *, retryable: bool = False) -> None:
+        """Estorno que não saiu. Uma nova falha de quem já está pendente só atualiza o motivo."""
+        if self.status == S.ESTORNO_PENDENTE:
+            self.updated_at = now or datetime.now(UTC)
+        else:
+            self._move(S.ESTORNO_PENDENTE, now)
         self.status_detail = reason[:100]
+        self.refund_retryable = retryable
 
     def is_expired(self, now: datetime) -> bool:
         return (

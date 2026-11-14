@@ -169,7 +169,8 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Na main: amd64 + arm64, publicada com a tag do commit e `latest`.
+      # Na main: amd64 + arm64, publicada só com a tag do commit. A `latest` é
+      # marcada depois do scan, para nunca apontar para uma imagem reprovada.
       - name: Build and push (main)
         if: github.event_name != 'pull_request'
         uses: docker/build-push-action@v6
@@ -177,9 +178,7 @@ jobs:
           context: .
           push: true
           platforms: linux/amd64,linux/arm64
-          tags: |
-            ${{ steps.image.outputs.name }}:latest
-            ${{ steps.image.outputs.ref }}
+          tags: ${{ steps.image.outputs.ref }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -191,6 +190,12 @@ jobs:
           severity: CRITICAL,HIGH
           exit-code: "1"
           ignore-unfixed: true
+
+      # Imagem aprovada: `latest` passa a apontar para ela, sem rebuild (só o
+      # manifesto multi-arquitetura ganha a tag nova).
+      - name: Tag latest
+        if: github.event_name != 'pull_request'
+        run: docker buildx imagetools create --tag "${{ steps.image.outputs.name }}:latest" "${{ steps.image.outputs.ref }}"
 
   # ─── CD: deploy no EKS ─────────────────────────────────────────────────────
   # Só na main e só com o cluster no ar: a variável DEPLOY_ENABLED do repositório

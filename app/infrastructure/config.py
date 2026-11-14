@@ -27,7 +27,11 @@ class Settings(BaseSettings):
 
     # Prazos de negócio.
     APPROVAL_TIMEOUT_MINUTES: int = 1440
+    # Prazo para pagar. Uma tentativa recusada não o encerra: o cliente pode tentar
+    # outro cartão no mesmo link até ele vencer.
     PAYMENT_TIMEOUT_MINUTES: int = 60
+    # Por quanto tempo um pagamento recusado, expirado ou cancelado ainda é consultado
+    # (um pagamento tardio é confirmado para a Saga estornar).
     LATE_PAYMENT_WINDOW_HOURS: int = 24
     PAYMENT_POLL_SECONDS: float = 15.0
 

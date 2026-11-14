@@ -59,18 +59,21 @@ O orquestrador fica no OS Service. Este serviço recebe comandos na fila `billin
 
 | Origem | Evento |
 |---|---|
-| Comando `GerarOrcamento` | `OrcamentoGerado` (com o total) ou `OrcamentoFalhou` (sem serviços nem peças, preço ausente, total zero) |
+| Comando `GerarOrcamento` | `OrcamentoGerado` (com o total) ou `OrcamentoFalhou` (sem serviços nem peças, preço ausente ou negativo, quantidade menor que 1, total zero) |
 | Cliente aprova / recusa | `OrcamentoAprovado` (com o link de pagamento) / `OrcamentoRecusado` |
 | Monitor: prazo de resposta esgotado | `OrcamentoExpirado` |
-| Monitor (ou `POST /payments/{order_id}/sync`): consulta ao Mercado Pago | `PagamentoConfirmado` ou `PagamentoRecusado`; `PagamentoExpirado` quando o prazo de pagamento vence sem pagamento aprovado |
+| Monitor (ou `POST /payments/{order_id}/sync`): consulta ao Mercado Pago | `PagamentoConfirmado` quando há pagamento aprovado. Quando o prazo de pagamento vence sem pagamento aprovado: `PagamentoRecusado` se houve tentativa recusada, senão `PagamentoExpirado` |
 | Comando `CancelarCobranca` (compensação) | `CobrancaCancelada`, com `estornado` e `estorno_pendente` |
 
 - **Aviso ao cliente:** ao gerar o orçamento, o cliente é avisado por log estruturado ou, com
   `SMTP_HOST` configurado, por e-mail.
 - **Idempotência:** orçamento único por OS; a mesma mensagem entregue duas vezes é descartada.
-- **Outbox:** cada mudança e o evento de resposta são gravados na mesma transação.
-- **Bloqueio:** aprovação e cancelamento simultâneos do mesmo orçamento não se sobrepõem
-  (`SELECT … FOR UPDATE`).
+- **Outbox:** cada mudança e o evento de resposta são gravados na mesma transação. O publicador
+  trata um evento por transação, com `FOR UPDATE SKIP LOCKED`: duas réplicas nunca publicam o
+  mesmo evento juntas.
+- **Bloqueio:** aprovação, cancelamento e expiração simultâneos do mesmo orçamento não se
+  sobrepõem (`SELECT … FOR UPDATE`). O monitor relê cada orçamento vencido travado antes de
+  expirá-lo, para não sobrescrever uma aprovação feita depois da leitura.
 
 ## Pagamento (Mercado Pago)
 
@@ -78,18 +81,25 @@ Checkout Pro com a API de Preferences: o cliente paga numa página do próprio M
 então o Billing não lida com dados de cartão.
 
 1. **Aprovação:** cria a *preferência* com o valor do orçamento, prazo de expiração e uma
-   `external_reference` única, e devolve o link de pagamento.
+   `external_reference` única, e devolve o link de pagamento. Boleto e pagamento em lotérica
+   ficam fora da preferência (`excluded_payment_types`: `ticket` e `atm`): são pagos dias depois,
+   fora da janela de pagamento tardio, e o dinheiro entraria sem ninguém para estorná-lo.
 2. **Confirmação por consulta:** a cada `PAYMENT_POLL_SECONDS` (15 s), o monitor busca os pagamentos da referência. Não
    depende de webhook, porque o endereço público do Kong muda a cada recriação do cluster.
-3. **Pagamento tardio:** um pagamento que chega depois de a cobrança expirar ou ser cancelada
-   ainda é detectado (janela de 24 h) e informado à Saga, que manda estornar.
-4. **Estorno (compensação):** estorno total com chave de idempotência; repetir o comando não
-   estorna duas vezes.
-   - Falha **temporária** (rede, erro 5xx, limite de requisições): nova tentativa e, depois, DLQ.
-   - Recusa **definitiva** (erro 4xx): o pagamento fica `ESTORNO_PENDENTE`, a compensação é
-     confirmada para a Saga não travar e o log registra `ESTORNO MANUAL NECESSÁRIO`. Quando o
-     estorno feito no painel aparece no Mercado Pago, o monitor concilia e o pagamento vira
-     `ESTORNADO`.
+3. **Tentativa recusada:** não encerra a cobrança. No Checkout Pro o cliente pode tentar outro
+   cartão no mesmo link até o prazo (`PAYMENT_TIMEOUT_MINUTES`); o pagamento continua `PENDENTE`,
+   com o motivo da última recusa em `status_detail`. Se o prazo vence sem pagamento aprovado, sai
+   `PagamentoRecusado` (houve recusa) ou `PagamentoExpirado` (não houve tentativa).
+4. **Pagamento tardio:** um pagamento que chega depois de a cobrança ser recusada, expirar ou ser
+   cancelada ainda é detectado (janela de 24 h) e informado à Saga, que manda estornar.
+5. **Estorno (compensação):** estorno total com chave de idempotência; repetir não estorna duas
+   vezes. Se o estorno falha, o pagamento fica `ESTORNO_PENDENTE` e a compensação é confirmada
+   assim mesmo (`estorno_pendente: true`), para a Saga não travar:
+   - Falha **temporária** (rede, erro 5xx, limite de requisições): o monitor tenta o estorno de
+     novo a cada ciclo, com a mesma chave de idempotência, até conseguir.
+   - Recusa **definitiva** (erro 4xx): não é repetida; o log registra `ESTORNO MANUAL NECESSÁRIO`.
+     Quando o estorno feito no painel aparece no Mercado Pago, o monitor concilia e o pagamento
+     vira `ESTORNADO`.
 
 A integração fica atrás da porta `PaymentGatewayPort`: os testes usam um dublê e não dependem do
 sandbox. A API de Preferences é marcada como legada pelo Mercado Pago (continua suportada); a
@@ -145,7 +155,7 @@ aprovar o orçamento e criar o pagamento acontecem numa transação ACID. O sche
 | Tabela | Conteúdo |
 |---|---|
 | `budgets`, `budget_lines` | Orçamento por OS, com serviços e peças (preços copiados do comando) |
-| `payments` | Cobranças no Mercado Pago, com o status e o estorno |
+| `payments` | Cobranças no Mercado Pago, com o status, o estorno e se um estorno pendente deve ser tentado de novo |
 | `outbox` | Eventos a publicar |
 | `processed_messages` | Comandos já processados |
 | `schema_migrations` | Migrations já aplicadas (controle do `app.infrastructure.migrations`) |
@@ -250,6 +260,19 @@ quality gate do SonarCloud bloqueia o merge.
 - [`docs/openapi.json`](docs/openapi.json): a especificação OpenAPI exportada da aplicação.
 - [`docs/postman/billing-service.postman_collection.json`](docs/postman/billing-service.postman_collection.json): todas as rotas do serviço,
   com as variáveis `base_url`, `token` e os ids usados nos caminhos.
+
+## Limitações conhecidas
+
+Decisões de escopo e casos de borda conhecidos, registrados para não passarem por recursos:
+
+- **Autenticação sem papéis.** O token emitido pela Lambda prova a identidade do cliente (CPF),
+  mas não carrega papel: qualquer token válido pode aprovar ou recusar o orçamento de qualquer
+  OS. O enunciado pede autenticação por CPF; a autorização por papel e a restrição do cliente
+  às próprias OS ficaram fora do escopo. Seria uma claim de papel no token e a checagem do dono
+  da OS nas rotas.
+- **Estorno no sandbox.** O sandbox do Mercado Pago recusa estorno por API com credencial de
+  vendedor de teste (401). O pagamento fica `ESTORNO_PENDENTE`, a compensação é confirmada e o
+  estorno é feito no painel e conciliado pelo monitor.
 
 ## Repositórios da plataforma
 

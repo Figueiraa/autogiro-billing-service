@@ -95,6 +95,13 @@ class Budget:
         ]
         if not lines:
             raise InvalidBudgetError("A ordem de serviço não tem serviços nem peças")
+        # Os mesmos limites do banco: uma linha inválida que chegasse ao INSERT viraria
+        # erro técnico, repetido até a DLQ, e a Saga ficaria parada.
+        for line in lines:
+            if line.quantity <= 0:
+                raise InvalidBudgetError(f"Quantidade inválida para {line.description}: {line.quantity}")
+            if line.unit_price < 0:
+                raise InvalidBudgetError(f"Preço negativo para {line.description}: {line.unit_price}")
 
         moment = now or datetime.now(UTC)
         budget = cls(
