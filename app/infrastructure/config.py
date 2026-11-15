@@ -3,7 +3,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     SERVICE_NAME: str = "billing-service"
-    SERVICE_VERSION: str = "0.1.0"
+    SERVICE_VERSION: str = "1.0.0"
 
     # Segredo HS256 compartilhado com a Lambda `autogiro-auth` (emissor) e com o
     # Kong (validador). O serviço revalida a assinatura em vez de confiar no
